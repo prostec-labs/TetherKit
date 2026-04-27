@@ -9,7 +9,7 @@ FAIL=0
 # ── 1. Apple Developer Team ID ────────────────────────────────────────────────
 # Flag DEVELOPMENT_TEAM set to an actual value in .xcconfig or .pbxproj files.
 # Ignores shell scripts, markdown, and comment lines.
-TEAM_HITS=$(git diff --cached --name-only | grep -E '\.(xcconfig|pbxproj)$' | while read -r f; do
+TEAM_HITS=$( (git diff --cached --name-only | grep -E '\.(xcconfig|pbxproj)$' || true) | while read -r f; do
     git diff --cached -- "$f" | grep -E '^\+[^+].*DEVELOPMENT_TEAM\s*=\s*[A-Z0-9]{10}' || true
 done)
 if [ -n "$TEAM_HITS" ]; then
@@ -20,7 +20,7 @@ if [ -n "$TEAM_HITS" ]; then
 fi
 
 # ── 2. Provisioning profile UUIDs in build config files ───────────────────────
-UUID_HITS=$(git diff --cached --name-only | grep -E '\.(xcconfig|pbxproj|plist|entitlements)$' | while read -r f; do
+UUID_HITS=$( (git diff --cached --name-only | grep -E '\.(xcconfig|pbxproj|plist|entitlements)$' || true) | while read -r f; do
     git diff --cached -- "$f" | grep -E '^\+[^+].*PROVISIONING_PROFILE_SPECIFIER\s*=\s*[0-9a-f-]{36}' || true
 done)
 if [ -n "$UUID_HITS" ]; then
@@ -36,7 +36,7 @@ if [ -n "$KEY_HITS" ]; then
 fi
 
 # ── 4. CI credential keywords in YAML / env files ────────────────────────────
-CI_HITS=$(git diff --cached --name-only | grep -E '\.(yml|yaml|env|sh)$' | while read -r f; do
+CI_HITS=$( (git diff --cached --name-only | grep -E '\.(yml|yaml|env|sh)$' || true) | while read -r f; do
     git diff --cached -- "$f" | grep -iE '^\+[^+].*(APPLE_ID|APP_PASSWORD|NOTARY_TEAM_ID)\s*[:=]\s*[^$({]' || true
 done)
 if [ -n "$CI_HITS" ]; then

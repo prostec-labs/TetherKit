@@ -22,8 +22,11 @@
  * ARCHITECTURE OVERVIEW
  * =====================
  * TetherKitDriver extends IOUserNetworkEthernet (NetworkingDriverKit) and is
- * matched against IOUSBHostInterface (USBDriverKit) by the three personalities
- * in Info.plist.  The data-path layout (DriverKit25):
+ * matched by four personalities in Info.plist: three interface-level personalities
+ * matching IOUSBHostInterface (USBDriverKit) for most RNDIS devices, and one
+ * device-level personality matching IOUSBHostDevice for Samsung S7 Edge and
+ * similar phones that expose bDeviceClass=224 instead of a composite device class.
+ * The data-path layout (DriverKit25):
  *
  *   macOS network stack
  *        │   ▲
@@ -74,6 +77,7 @@
 
 // Forward declarations — full headers included in the .cpp implementation.
 class IOUSBHostInterface;
+class IOUSBHostDevice;
 
 // IOUserNetworkEthernet still declares SetMulticastAddresses/SelectMediaType
 // as pure-virtual NDK_21-deprecated overrides that take the deprecated
@@ -86,10 +90,13 @@ class IOUSBHostInterface;
 
 /// TetherKitDriver — DriverKit extension that provides RNDIS USB tethering.
 ///
-/// Matches IOUSBHostInterface (the RNDIS control interface).  On Start it
-/// opens the control interface, finds the adjacent CDC-Data interface, opens
-/// its bulk-IN and bulk-OUT pipes, runs the RNDIS handshake, then registers
-/// the Ethernet interface with NetworkingDriverKit.
+/// Matches either IOUSBHostInterface (three interface-level personalities for
+/// most RNDIS devices) or IOUSBHostDevice (WirelessControllerDevice personality
+/// for Samsung S7 Edge and similar phones that expose bDeviceClass=224 instead
+/// of a composite device class).  On Start it opens the RNDIS control interface,
+/// finds the adjacent CDC-Data interface, opens its bulk-IN and bulk-OUT pipes,
+/// runs the RNDIS handshake, then registers the Ethernet interface with
+/// NetworkingDriverKit.
 ///
 class TetherKitDriver : public IOUserNetworkEthernet
 {
@@ -179,6 +186,7 @@ private:
     // -----------------------------------------------------------------------
 
     // USB setup
+    virtual kern_return_t openCommInterfaceFromDevice(IOUSBHostDevice * device) LOCALONLY;
     virtual kern_return_t openDataInterface() LOCALONLY;
     virtual kern_return_t allocateTransferResources() LOCALONLY;
     virtual kern_return_t setupNetworkInterface() LOCALONLY;

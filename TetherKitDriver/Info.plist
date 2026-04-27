@@ -49,17 +49,19 @@
 
     <!-- ===================================================================
          IOKitPersonalities
-         Three matching personalities covering all known RNDIS control
-         interface variants (mirroring the original HoRNDIS kext).
+         Four matching personalities covering all known RNDIS variants
+         (mirroring the original HoRNDIS kext).
 
-         IOClass          = IOUserService   (always for dexts)
+         IOClass          = IOUserService     (always for dexts)
          IOUserClass      = TetherKitDriver   (our C++ class name from IIG)
-         IOProviderClass  = IOUSBHostInterface (matched control interface)
+         IOProviderClass  = IOUSBHostInterface (personalities 1-3, interface-level)
+                          | IOUSBHostDevice   (personality 4, device-level)
          IOMatchCategory  = TetherKitDriver   (prevents duplicate matching)
          IOUserServerName = com.prostec.tetherkit.driver (must match entitlement)
 
-         The three bInterfaceClass/SubClass/Protocol triples are documented
-         exhaustively in the original HoRNDIS.cpp DEVICE VARIATIONS section.
+         The three interface-level class/subclass/protocol triples and the one
+         device-level triple are documented in the original HoRNDIS.cpp
+         DEVICE VARIATIONS section.
     =================================================================== -->
     <key>IOKitPersonalities</key>
     <dict>
@@ -156,6 +158,41 @@
             <integer>2</integer>
             <key>bInterfaceProtocol</key>
             <integer>255</integer>
+        </dict>
+
+        <!--
+            [4] Wireless Controller Device (device-class 224).
+                Some Samsung phones (e.g. S7 Edge) expose bDeviceClass=224 instead
+                of presenting as a USB composite device (class 0/0/0).  This means
+                macOS will not automatically enumerate the interfaces, so we match
+                at the device level and call SetConfiguration ourselves.
+                bDeviceClass=224 (Wireless Controller)
+                bDeviceSubClass=0
+                bDeviceProtocol=0
+                Provider: IOUSBHostDevice (not IOUSBHostInterface).
+        -->
+        <key>WirelessControllerDevice</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOClass</key>
+            <string>IOUserService</string>
+            <key>IOUserClass</key>
+            <string>TetherKitDriver</string>
+            <key>IOProviderClass</key>
+            <string>IOUSBHostDevice</string>
+            <key>IOMatchCategory</key>
+            <string>TetherKitDriver</string>
+            <key>IOUserServerName</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOUserServerOneProcess</key>
+            <true/>
+            <key>bDeviceClass</key>
+            <integer>224</integer>
+            <key>bDeviceSubClass</key>
+            <integer>0</integer>
+            <key>bDeviceProtocol</key>
+            <integer>0</integer>
         </dict>
 
     </dict>

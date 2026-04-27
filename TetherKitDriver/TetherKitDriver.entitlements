@@ -14,7 +14,7 @@
     During local development you can bypass entitlement checks with SIP disabled
     and systemextensionsctl developer on.  See README.md → Development Setup.
 
-    All three USB match dictionaries here MUST match the IOKitPersonalities in
+    All four USB match dictionaries here MUST match the IOKitPersonalities in
     Info.plist exactly, or the kernel will refuse to load the dext.
 -->
 <plist version="1.0">
@@ -84,6 +84,20 @@
             <integer>2</integer>
             <key>bInterfaceProtocol</key>
             <integer>255</integer>
+        </dict>
+
+        <!--
+            Personality 4: WirelessControllerDevice (device-level match)
+            Covers Samsung S7 Edge and similar pre-composite-class phones.
+            bDeviceClass=224, bDeviceSubClass=0, bDeviceProtocol=0
+        -->
+        <dict>
+            <key>bDeviceClass</key>
+            <integer>224</integer>
+            <key>bDeviceSubClass</key>
+            <integer>0</integer>
+            <key>bDeviceProtocol</key>
+            <integer>0</integer>
         </dict>
 
     </array>

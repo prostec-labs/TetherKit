@@ -84,9 +84,23 @@ struct TetherKitDriver_IVars {
 
     IOBufferMemoryDescriptor * cmdBuf;
     bool running;
+    bool rndisInitDone;
 };
 
 #define IVARS ((TetherKitDriver_IVars *) ivars)
+
+static inline bool isRNDISControlInterface(const IOUSBInterfaceDescriptor * d) {
+    // Stock Android: Wireless Controller / Radio Frequency / RNDIS
+    if (d->bInterfaceClass == 0xE0 && d->bInterfaceSubClass == 0x01 && d->bInterfaceProtocol == 0x03)
+        return true;
+    // RNDIS over Ethernet: Miscellaneous Device (Nokia 7+, Sony Xperia XZ)
+    if (d->bInterfaceClass == 0xEF && d->bInterfaceSubClass == 0x04 && d->bInterfaceProtocol == 0x01)
+        return true;
+    // Linux USB gadget RNDIS (f_rndis.c): CDC Control / ACM / Vendor-specific
+    if (d->bInterfaceClass == 0x02 && d->bInterfaceSubClass == 0x02 && d->bInterfaceProtocol == 0xFF)
+        return true;
+    return false;
+}
 
 static constexpr int kMaxAttempts = 10;
 static constexpr uint32_t kRetryDelayMs = 20;
@@ -170,39 +184,48 @@ kern_return_t
 TetherKitDriver::Start_Impl(IOService * provider)
 {
     kern_return_t ret = Start(provider, SUPERDISPATCH);
-    const IOUSBConfigurationDescriptor * cfgDesc = nullptr;
-    const IOUSBInterfaceDescriptor * desc = nullptr;
     if (ret != kIOReturnSuccess) {
         return ret;
     }
 
-    IVARS->commInterface = OSDynamicCast(IOUSBHostInterface, provider);
-    if (!IVARS->commInterface) {
-        ret = kIOReturnBadArgument;
-        goto bail;
-    }
-    IVARS->commInterface->retain();
+    // Provider is IOUSBHostDevice for the WirelessControllerDevice personality
+    // (Samsung S7 Edge, class 224/0/0) or IOUSBHostInterface for the three
+    // interface-level personalities that cover all other RNDIS devices.
+    IOUSBHostDevice * device = OSDynamicCast(IOUSBHostDevice, provider);
+    if (device) {
+        ret = openCommInterfaceFromDevice(device);
+        if (ret != kIOReturnSuccess) {
+            goto bail;
+        }
+    } else {
+        IOUSBHostInterface * iface = OSDynamicCast(IOUSBHostInterface, provider);
+        if (!iface) {
+            ret = kIOReturnBadArgument;
+            goto bail;
+        }
+        ret = iface->Open(this, 0, nullptr);
+        if (ret != kIOReturnSuccess) {
+            goto bail;
+        }
+        iface->retain();
+        IVARS->commInterface = iface;
 
-    ret = IVARS->commInterface->Open(this, 0, nullptr);
-    if (ret != kIOReturnSuccess) {
-        goto bail;
+        // CopyConfigurationDescriptor() returns a newly-allocated buffer that
+        // the caller must release via IOUSBHostFreeDescriptor().
+        const IOUSBConfigurationDescriptor * cfgDesc = IVARS->commInterface->CopyConfigurationDescriptor();
+        if (!cfgDesc) {
+            ret = kIOReturnError;
+            goto bail;
+        }
+        const IOUSBInterfaceDescriptor * desc = IVARS->commInterface->GetInterfaceDescriptor(cfgDesc);
+        if (!desc) {
+            IOUSBHostFreeDescriptor(cfgDesc);
+            ret = kIOReturnError;
+            goto bail;
+        }
+        IVARS->commIfNumber = desc->bInterfaceNumber;
+        IOUSBHostFreeDescriptor(cfgDesc);
     }
-
-    // CopyConfigurationDescriptor() returns a newly-allocated buffer that the
-    // caller must release via IOUSBHostFreeDescriptor() (see USBDriverKitDefs.h).
-    cfgDesc = IVARS->commInterface->CopyConfigurationDescriptor();
-    if (!cfgDesc) {
-        ret = kIOReturnError;
-        goto bail;
-    }
-    desc = IVARS->commInterface->GetInterfaceDescriptor(cfgDesc);
-    if (!desc) {
-        ret = kIOReturnError;
-        goto bail;
-    }
-    IVARS->commIfNumber = desc->bInterfaceNumber;
-    IOUSBHostFreeDescriptor(cfgDesc);
-    cfgDesc = nullptr;
 
     ret = openDataInterface();
     if (ret != kIOReturnSuccess) {
@@ -252,9 +275,6 @@ TetherKitDriver::Start_Impl(IOService * provider)
     return kIOReturnSuccess;
 
 bail:
-    if (cfgDesc) {
-        IOUSBHostFreeDescriptor(cfgDesc);
-    }
     Stop_Impl(provider);
     return ret == kIOReturnSuccess ? kIOReturnError : ret;
 }
@@ -264,7 +284,7 @@ TetherKitDriver::Stop_Impl(IOService * provider)
 {
     IVARS->running = false;
 
-    if (IVARS->commInterface && IVARS->cmdBuf) {
+    if (IVARS->commInterface && IVARS->rndisInitDone) {
         rndisSetPacketFilter(0);
     }
 
@@ -308,6 +328,107 @@ TetherKitDriver::Stop_Impl(IOService * provider)
 }
 
 static constexpr uint8_t kUSBInterfaceClassCDCData = 0x0A;
+
+kern_return_t
+TetherKitDriver::openCommInterfaceFromDevice(IOUSBHostDevice * device)
+{
+    // Mirror HoRNDIS probeDevice: scan all configurations for an RNDIS control
+    // interface immediately followed by a CDC-Data interface, then set that config.
+    // Samsung S7 Edge exposes both an MTP-only config and a tethering config, so
+    // hardcoding index 0 is not sufficient.
+    const IOUSBDeviceDescriptor * devDesc = device->GetDeviceDescriptor();
+    if (!devDesc) {
+        return kIOReturnError;
+    }
+
+    uint8_t configValue = 0;
+    uint8_t controlIfNum = 0xFF;
+    const IOUSBConfigurationDescriptor * winningCfg = nullptr;
+
+    for (uint8_t i = 0; i < devDesc->bNumConfigurations; i++) {
+        const IOUSBConfigurationDescriptor * cfgDesc = device->CopyConfigurationDescriptor(i);
+        if (!cfgDesc) {
+            continue;
+        }
+        const IOUSBInterfaceDescriptor * intDesc = nullptr;
+        while ((intDesc = IOUSBGetNextInterfaceDescriptor(
+                    cfgDesc,
+                    reinterpret_cast<const IOUSBDescriptorHeader *>(intDesc))) != nullptr) {
+            if (!isRNDISControlInterface(intDesc)) {
+                continue;
+            }
+            // Skip past any alt settings for this interface before checking
+            // CDC-Data adjacency — an alt setting has the same bInterfaceNumber
+            // but a non-CDC class, which would cause a false miss if unchecked.
+            const IOUSBInterfaceDescriptor * next = intDesc;
+            while ((next = IOUSBGetNextInterfaceDescriptor(
+                        cfgDesc,
+                        reinterpret_cast<const IOUSBDescriptorHeader *>(next))) != nullptr) {
+                if (next->bInterfaceNumber != intDesc->bInterfaceNumber) {
+                    break;
+                }
+            }
+            if (next &&
+                next->bInterfaceClass == kUSBInterfaceClassCDCData &&
+                next->bInterfaceNumber == intDesc->bInterfaceNumber + 1) {
+                configValue = cfgDesc->bConfigurationValue;
+                controlIfNum = intDesc->bInterfaceNumber;
+                winningCfg = cfgDesc; // transfer ownership; freed below
+                break;
+            }
+        }
+        if (winningCfg) {
+            break;
+        }
+        IOUSBHostFreeDescriptor(cfgDesc);
+    }
+
+    if (!winningCfg) {
+        return kIOReturnNotFound;
+    }
+
+    kern_return_t ret = device->SetConfiguration(configValue, false);
+    if (ret != kIOReturnSuccess) {
+        IOUSBHostFreeDescriptor(winningCfg);
+        return ret;
+    }
+
+    uintptr_t iterator = 0;
+    ret = device->CreateInterfaceIterator(&iterator);
+    if (ret != kIOReturnSuccess) {
+        IOUSBHostFreeDescriptor(winningCfg);
+        return ret;
+    }
+
+    while (true) {
+        IOUSBHostInterface * candidate = nullptr;
+        ret = device->CopyInterface(iterator, &candidate);
+        if (ret != kIOReturnSuccess || !candidate) {
+            break;
+        }
+        const IOUSBInterfaceDescriptor * d = candidate->GetInterfaceDescriptor(winningCfg);
+        if (d && d->bInterfaceNumber == controlIfNum) {
+            IVARS->commInterface = candidate; // CopyInterface already retains
+            break;
+        }
+        OSSafeReleaseNULL(candidate);
+    }
+    device->DestroyInterfaceIterator(iterator);
+    IOUSBHostFreeDescriptor(winningCfg);
+
+    if (!IVARS->commInterface) {
+        return kIOReturnNotFound;
+    }
+
+    ret = IVARS->commInterface->Open(this, 0, nullptr);
+    if (ret != kIOReturnSuccess) {
+        OSSafeReleaseNULL(IVARS->commInterface);
+        return ret;
+    }
+
+    IVARS->commIfNumber = controlIfNum;
+    return kIOReturnSuccess;
+}
 
 kern_return_t
 TetherKitDriver::openDataInterface()
@@ -853,6 +974,7 @@ TetherKitDriver::rndisInit()
     const rndis_init_c * initC = reinterpret_cast<const rndis_init_c *>(bufAddr);
     uint32_t devMax = le32_to_cpu(initC->max_transfer_size);
     IVARS->maxOutTransferSize = (devMax < OUT_BUF_SIZE) ? devMax : OUT_BUF_SIZE;
+    IVARS->rndisInitDone = true;
     return kIOReturnSuccess;
 }
 
