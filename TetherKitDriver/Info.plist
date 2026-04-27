@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Standard bundle metadata -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+
+    <key>CFBundleGetInfoString</key>
+    <string>TetherKit — Android/RNDIS USB tethering driver for macOS</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+
+    <key>CFBundlePackageType</key>
+    <string>DEXT</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!--
+        Human-readable purpose string shown in System Settings → Privacy & Security
+        when the user is prompted to allow the extension.
+    -->
+    <key>OSBundleUsageDescription</key>
+    <string>TetherKit provides network tethering from Android devices over USB using the RNDIS protocol.</string>
+
+    <!--
+        IOUserServerCDHashes: Leave as empty array during development.
+        When notarizing for distribution, Xcode / codesign will populate this
+        with the code-directory hash of the signed dext binary.
+        Per Apple's DriverKit documentation, this must be present in
+        production-signed dexts.
+    -->
+    <key>IOUserServerCDHashes</key>
+    <array/>
+
+    <!-- ===================================================================
+         IOKitPersonalities
+         Three matching personalities covering all known RNDIS control
+         interface variants (mirroring the original HoRNDIS kext).
+
+         IOClass          = IOUserService   (always for dexts)
+         IOUserClass      = TetherKitDriver   (our C++ class name from IIG)
+         IOProviderClass  = IOUSBHostInterface (matched control interface)
+         IOMatchCategory  = TetherKitDriver   (prevents duplicate matching)
+         IOUserServerName = com.prostec.tetherkit.driver (must match entitlement)
+
+         The three bInterfaceClass/SubClass/Protocol triples are documented
+         exhaustively in the original HoRNDIS.cpp DEVICE VARIATIONS section.
+    =================================================================== -->
+    <key>IOKitPersonalities</key>
+    <dict>
+
+        <!--
+            [1] "Stock" Android — most Android phones in USB tethering mode.
+                bInterfaceClass=224 (Wireless Controller)
+                bInterfaceSubClass=1 (Radio Frequency)
+                bInterfaceProtocol=3 (RNDIS)
+                Examples: Pixel, Galaxy S8+, OnePlus, Xiaomi, …
+        -->
+        <key>RNDISControlStockAndroid</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOClass</key>
+            <string>IOUserService</string>
+            <key>IOUserClass</key>
+            <string>TetherKitDriver</string>
+            <key>IOProviderClass</key>
+            <string>IOUSBHostInterface</string>
+            <key>IOMatchCategory</key>
+            <string>TetherKitDriver</string>
+            <key>IOUserServerName</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOUserServerOneProcess</key>
+            <true/>
+            <key>bInterfaceClass</key>
+            <integer>224</integer>
+            <key>bInterfaceSubClass</key>
+            <integer>1</integer>
+            <key>bInterfaceProtocol</key>
+            <integer>3</integer>
+        </dict>
+
+        <!--
+            [2] RNDIS over Ethernet (Miscellaneous Device class 0xEF).
+                Nokia 7 Plus (issue #88), Sony Xperia XZ.
+                Per USB.org BaseClassEFh specification.
+                bInterfaceClass=239 (Miscellaneous Device)
+                bInterfaceSubClass=4
+                bInterfaceProtocol=1 (RNDIS over Ethernet)
+        -->
+        <key>RNDISControlMiscDeviceRoE</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOClass</key>
+            <string>IOUserService</string>
+            <key>IOUserClass</key>
+            <string>TetherKitDriver</string>
+            <key>IOProviderClass</key>
+            <string>IOUSBHostInterface</string>
+            <key>IOMatchCategory</key>
+            <string>TetherKitDriver</string>
+            <key>IOUserServerName</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOUserServerOneProcess</key>
+            <true/>
+            <key>bInterfaceClass</key>
+            <integer>239</integer>
+            <key>bInterfaceSubClass</key>
+            <integer>4</integer>
+            <key>bInterfaceProtocol</key>
+            <integer>1</integer>
+        </dict>
+
+        <!--
+            [3] Linux USB Gadget RNDIS (f_rndis.c in kernel).
+                BeagleBone, Analog Devices PlutoSDR, other embedded Linux boards.
+                bInterfaceClass=2 (Communications / CDC Control)
+                bInterfaceSubClass=2 (Abstract Control Model / modem)
+                bInterfaceProtocol=255 (Vendor-specific; signals RNDIS on Linux gadget)
+        -->
+        <key>RNDISControlLinuxGadget</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOClass</key>
+            <string>IOUserService</string>
+            <key>IOUserClass</key>
+            <string>TetherKitDriver</string>
+            <key>IOProviderClass</key>
+            <string>IOUSBHostInterface</string>
+            <key>IOMatchCategory</key>
+            <string>TetherKitDriver</string>
+            <key>IOUserServerName</key>
+            <string>com.prostec.tetherkit.driver</string>
+            <key>IOUserServerOneProcess</key>
+            <true/>
+            <key>bInterfaceClass</key>
+            <integer>2</integer>
+            <key>bInterfaceSubClass</key>
+            <integer>2</integer>
+            <key>bInterfaceProtocol</key>
+            <integer>255</integer>
+        </dict>
+
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    TetherKitLoader.entitlements
+
+    SANDBOX NOTE:
+    =============
+    DriverKit system extension loader apps are NOT sandboxed in Apple's
+    recommended deployment shape.  Apple's own sample code (Allowing Apps and
+    Websites to Link to Your Content) and the ASIX/Plugable AX88179 loader
+    pattern both run the loader unsandboxed.  The macOS security model for
+    dexts is enforced at the kernel / dext-sandbox layer, not the App Sandbox.
+
+    If you choose to enable the App Sandbox in future, you will need to add
+    a sandbox temporary exception for system extension installation, which
+    Apple does not currently provide a supported path for in the public API.
+
+    Therefore: com.apple.security.app-sandbox is intentionally set to false.
+-->
+<plist version="1.0">
+<dict>
+
+    <!--
+        Required to submit OSSystemExtensionRequest for the embedded dext.
+        Must be approved by Apple (via App Store review or notarization with
+        the appropriate entitlement in your provisioning profile).
+    -->
+    <key>com.apple.developer.system-extension.install</key>
+    <true/>
+
+    <!--
+        Loader apps must NOT be sandboxed when installing DriverKit extensions.
+        The App Sandbox would block the systemextensionsd XPC communication.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!--
+        Hardened Runtime — required for notarization.
+        These are the minimum exceptions needed; do not broaden them.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+
+</dict>
+</plist>

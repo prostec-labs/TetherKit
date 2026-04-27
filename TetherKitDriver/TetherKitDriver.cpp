@@ -1,0 +1,942 @@
+/* TetherKitDriver.cpp
+ * TetherKit — DriverKit RNDIS USB tethering driver for macOS.
+ * HoRNDIS — RNDIS USB tethering driver for macOS
+ *
+ *   Copyright (c) 2012 Joshua Wise.
+ *   Copyright (c) 2018 Mikhail Iakhiaev
+ *
+ * RNDIS logic derived from linux/drivers/net/usb/rndis_host.c:
+ *   Copyright (c) 2005 David Brownell.
+ *
+ * Ported to DriverKit by Prostec Labs, 2026.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#include "TetherKitDriver.h"
+#pragma clang diagnostic pop
+#include "RNDISProtocol.h"
+
+#include <DriverKit/IOLib.h>
+#include <DriverKit/IOTypes.h>
+#include <DriverKit/IOMemoryDescriptor.h>
+#include <DriverKit/IOBufferMemoryDescriptor.h>
+#include <DriverKit/OSData.h>
+#include <DriverKit/OSDictionary.h>
+#include <DriverKit/OSNumber.h>
+#include <DriverKit/OSString.h>
+
+#include <USBDriverKit/AppleUSBDefinitions.h>
+#include <USBDriverKit/AppleUSBDescriptorParsing.h>
+#include <USBDriverKit/IOUSBHostDevice.h>
+#include <USBDriverKit/IOUSBHostInterface.h>
+#include <USBDriverKit/IOUSBHostPipe.h>
+#include <USBDriverKit/USBDriverKitDefs.h>
+
+#include <NetworkingDriverKit/IOUserNetworkEthernet.h>
+#include <NetworkingDriverKit/IOUserNetworkPacket.h>
+#include <NetworkingDriverKit/IOUserNetworkPacketBufferPool.h>
+#include <NetworkingDriverKit/IOUserNetworkPacketQueue.h>
+#include <NetworkingDriverKit/IOUserNetworkTxSubmissionQueue.h>
+
+#include <os/log.h>
+
+#define LOG_INFO(fmt, ...)  os_log(OS_LOG_DEFAULT, "[TetherKit] " fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) os_log(OS_LOG_DEFAULT, "[TetherKit] ERROR " fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) os_log(OS_LOG_DEFAULT, "[TetherKit] DEBUG " fmt, ##__VA_ARGS__)
+
+#define super IOUserNetworkEthernet
+
+struct TetherKitDriver_IVars {
+    IOUSBHostInterface * commInterface;
+    IOUSBHostInterface * dataInterface;
+    IOUSBHostPipe * inPipe;
+    IOUSBHostPipe * outPipe;
+    uint8_t commIfNumber;
+
+    uint32_t rndisXid;
+    uint32_t maxOutTransferSize;
+    uint8_t macAddr[6];
+
+    IOBufferMemoryDescriptor * inBufs[N_IN_BUFS];
+    OSAction * inActions[N_IN_BUFS];
+    uint64_t inBufAddrs[N_IN_BUFS];
+
+    IOBufferMemoryDescriptor * outBufs[N_OUT_BUFS];
+    OSAction * outActions[N_OUT_BUFS];
+    uint64_t outBufAddrs[N_OUT_BUFS];
+    uint8_t outBufStack[N_OUT_BUFS];
+    int numFreeOutBufs;
+
+    IOUserNetworkPacketBufferPool * pktPool;
+    IOUserNetworkPacketQueue * txQueue;
+    IOUserNetworkPacketQueue * rxQueue;
+
+    IOBufferMemoryDescriptor * cmdBuf;
+    bool running;
+};
+
+#define IVARS ((TetherKitDriver_IVars *) ivars)
+
+static constexpr int kMaxAttempts = 10;
+static constexpr uint32_t kRetryDelayMs = 20;
+static constexpr uint32_t kTimeoutMs = 5000;
+static constexpr uint32_t kMinResponseBytes = 12;
+
+static inline bool isUsbGoneStatus(IOReturn rc) {
+    return rc == kIOReturnAborted || rc == kIOReturnNotResponding || rc == kIOReturnNoDevice;
+}
+
+static uint32_t queryTxFreeSpace(OSObject * target,
+                                 IOUserNetworkPacketQueue * /* queue */,
+                                 uint32_t * freeSpaceBytes)
+{
+    TetherKitDriver * self = OSDynamicCast(TetherKitDriver, target);
+    if (!self || !freeSpaceBytes) {
+        return 0;
+    }
+    *freeSpaceBytes = self->availableTxBytes();
+    return 1;
+}
+
+static uint32_t dequeueTxPackets(OSObject * target,
+                                 IOUserNetworkPacketQueue * /* queue */,
+                                 IOUserNetworkPacket ** packetArray,
+                                 uint32_t packetCount,
+                                 void * /* refCon */)
+{
+    TetherKitDriver * self = OSDynamicCast(TetherKitDriver, target);
+    if (!self || !packetArray || packetCount == 0) {
+        return 0;
+    }
+    return self->consumeTxPackets(packetArray, packetCount);
+}
+
+bool
+TetherKitDriver::init()
+{
+    if (!super::init()) {
+        return false;
+    }
+
+    ivars = IONewZero(TetherKitDriver_IVars, 1);
+    if (!ivars) {
+        return false;
+    }
+
+    IVARS->rndisXid = 1;
+    for (int i = 0; i < N_OUT_BUFS; i++) {
+        IVARS->outBufStack[i] = static_cast<uint8_t>(i);
+    }
+    return true;
+}
+
+void
+TetherKitDriver::free()
+{
+    if (ivars) {
+        for (int i = 0; i < N_IN_BUFS; i++) {
+            OSSafeReleaseNULL(IVARS->inBufs[i]);
+            OSSafeReleaseNULL(IVARS->inActions[i]);
+        }
+        for (int i = 0; i < N_OUT_BUFS; i++) {
+            OSSafeReleaseNULL(IVARS->outBufs[i]);
+            OSSafeReleaseNULL(IVARS->outActions[i]);
+        }
+        OSSafeReleaseNULL(IVARS->cmdBuf);
+        OSSafeReleaseNULL(IVARS->inPipe);
+        OSSafeReleaseNULL(IVARS->outPipe);
+        OSSafeReleaseNULL(IVARS->dataInterface);
+        OSSafeReleaseNULL(IVARS->commInterface);
+        OSSafeReleaseNULL(IVARS->pktPool);
+        OSSafeReleaseNULL(IVARS->txQueue);
+        OSSafeReleaseNULL(IVARS->rxQueue);
+        IOSafeDeleteNULL(ivars, TetherKitDriver_IVars, 1);
+    }
+    super::free();
+}
+
+kern_return_t
+TetherKitDriver::Start_Impl(IOService * provider)
+{
+    kern_return_t ret = Start(provider, SUPERDISPATCH);
+    const IOUSBConfigurationDescriptor * cfgDesc = nullptr;
+    const IOUSBInterfaceDescriptor * desc = nullptr;
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    IVARS->commInterface = OSDynamicCast(IOUSBHostInterface, provider);
+    if (!IVARS->commInterface) {
+        ret = kIOReturnBadArgument;
+        goto bail;
+    }
+    IVARS->commInterface->retain();
+
+    ret = IVARS->commInterface->Open(this, 0, nullptr);
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    // CopyConfigurationDescriptor() returns a newly-allocated buffer that the
+    // caller must release via IOUSBHostFreeDescriptor() (see USBDriverKitDefs.h).
+    cfgDesc = IVARS->commInterface->CopyConfigurationDescriptor();
+    if (!cfgDesc) {
+        ret = kIOReturnError;
+        goto bail;
+    }
+    desc = IVARS->commInterface->GetInterfaceDescriptor(cfgDesc);
+    if (!desc) {
+        ret = kIOReturnError;
+        goto bail;
+    }
+    IVARS->commIfNumber = desc->bInterfaceNumber;
+    IOUSBHostFreeDescriptor(cfgDesc);
+    cfgDesc = nullptr;
+
+    ret = openDataInterface();
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, RNDIS_CMD_BUF_SZ, 0, &IVARS->cmdBuf);
+    if (ret != kIOReturnSuccess || !IVARS->cmdBuf) {
+        ret = kIOReturnNoMemory;
+        goto bail;
+    }
+
+    ret = rndisInit();
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    ret = queryMacAddress();
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    ret = allocateTransferResources();
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    ret = setupNetworkInterface();
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    ret = rndisSetPacketFilter(RNDIS_DEFAULT_FILTER);
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    ret = scheduleInboundReads();
+    if (ret != kIOReturnSuccess) {
+        goto bail;
+    }
+
+    IVARS->running = true;
+    reportLinkStatus(kIOUserNetworkLinkStatusActive, 0);
+    pumpTxQueue();
+    RegisterService();
+    return kIOReturnSuccess;
+
+bail:
+    if (cfgDesc) {
+        IOUSBHostFreeDescriptor(cfgDesc);
+    }
+    Stop_Impl(provider);
+    return ret == kIOReturnSuccess ? kIOReturnError : ret;
+}
+
+kern_return_t
+TetherKitDriver::Stop_Impl(IOService * provider)
+{
+    IVARS->running = false;
+
+    if (IVARS->commInterface && IVARS->cmdBuf) {
+        rndisSetPacketFilter(0);
+    }
+
+    reportLinkStatus(kIOUserNetworkLinkStatusInvalid, 0);
+
+    if (IVARS->inPipe) {
+        IVARS->inPipe->Abort(0, kIOReturnAborted, this);
+    }
+    if (IVARS->outPipe) {
+        IVARS->outPipe->Abort(0, kIOReturnAborted, this);
+    }
+
+    if (IVARS->dataInterface) {
+        IVARS->dataInterface->Close(this, 0);
+        OSSafeReleaseNULL(IVARS->dataInterface);
+    }
+    if (IVARS->commInterface) {
+        IVARS->commInterface->Close(this, 0);
+        OSSafeReleaseNULL(IVARS->commInterface);
+    }
+
+    OSSafeReleaseNULL(IVARS->inPipe);
+    OSSafeReleaseNULL(IVARS->outPipe);
+
+    for (int i = 0; i < N_IN_BUFS; i++) {
+        OSSafeReleaseNULL(IVARS->inBufs[i]);
+        OSSafeReleaseNULL(IVARS->inActions[i]);
+    }
+    for (int i = 0; i < N_OUT_BUFS; i++) {
+        OSSafeReleaseNULL(IVARS->outBufs[i]);
+        OSSafeReleaseNULL(IVARS->outActions[i]);
+    }
+    IVARS->numFreeOutBufs = 0;
+
+    OSSafeReleaseNULL(IVARS->cmdBuf);
+    OSSafeReleaseNULL(IVARS->txQueue);
+    OSSafeReleaseNULL(IVARS->rxQueue);
+    OSSafeReleaseNULL(IVARS->pktPool);
+
+    return Stop(provider, SUPERDISPATCH);
+}
+
+static constexpr uint8_t kUSBInterfaceClassCDCData = 0x0A;
+
+kern_return_t
+TetherKitDriver::openDataInterface()
+{
+    kern_return_t ret;
+    IOUSBHostDevice * device = nullptr;
+
+    ret = IVARS->commInterface->CopyDevice(&device);
+    if (ret != kIOReturnSuccess || !device) {
+        return kIOReturnError;
+    }
+
+    // CopyConfigurationDescriptor() returns a newly-allocated buffer that the
+    // caller must release via IOUSBHostFreeDescriptor() (see USBDriverKitDefs.h).
+    const IOUSBConfigurationDescriptor * configDesc = IVARS->commInterface->CopyConfigurationDescriptor();
+    if (!configDesc) {
+        OSSafeReleaseNULL(device);
+        return kIOReturnError;
+    }
+
+    uint8_t targetIfNum = IVARS->commIfNumber + 1;
+    const IOUSBInterfaceDescriptor * intDesc = nullptr;
+    while ((intDesc = IOUSBGetNextInterfaceDescriptor(
+                configDesc,
+                reinterpret_cast<const IOUSBDescriptorHeader *>(intDesc))) != nullptr) {
+        if (intDesc->bInterfaceNumber == targetIfNum && intDesc->bInterfaceClass == kUSBInterfaceClassCDCData) {
+            break;
+        }
+    }
+    if (!intDesc) {
+        IOUSBHostFreeDescriptor(configDesc);
+        OSSafeReleaseNULL(device);
+        return kIOReturnNotFound;
+    }
+
+    uintptr_t iterator = 0;
+    ret = device->CreateInterfaceIterator(&iterator);
+    if (ret != kIOReturnSuccess) {
+        IOUSBHostFreeDescriptor(configDesc);
+        OSSafeReleaseNULL(device);
+        return ret;
+    }
+    while (true) {
+        IOUSBHostInterface * candidate = nullptr;
+        ret = device->CopyInterface(iterator, &candidate);
+        if (ret != kIOReturnSuccess || !candidate) {
+            break;
+        }
+        const IOUSBInterfaceDescriptor * d = candidate->GetInterfaceDescriptor(configDesc);
+        if (d && d->bInterfaceNumber == targetIfNum) {
+            IVARS->dataInterface = candidate;
+            break;
+        }
+        OSSafeReleaseNULL(candidate);
+    }
+    device->DestroyInterfaceIterator(iterator);
+    OSSafeReleaseNULL(device);
+
+    if (!IVARS->dataInterface) {
+        IOUSBHostFreeDescriptor(configDesc);
+        return kIOReturnNotFound;
+    }
+
+    ret = IVARS->dataInterface->Open(this, 0, nullptr);
+    if (ret != kIOReturnSuccess) {
+        IOUSBHostFreeDescriptor(configDesc);
+        OSSafeReleaseNULL(IVARS->dataInterface);
+        return ret;
+    }
+
+    const IOUSBInterfaceDescriptor * dataIfDesc = IVARS->dataInterface->GetInterfaceDescriptor(configDesc);
+    if (!dataIfDesc) {
+        IOUSBHostFreeDescriptor(configDesc);
+        return kIOReturnError;
+    }
+
+    const IOUSBEndpointDescriptor * epDesc = nullptr;
+    while ((epDesc = IOUSBGetNextEndpointDescriptor(
+                configDesc,
+                dataIfDesc,
+                reinterpret_cast<const IOUSBDescriptorHeader *>(epDesc))) != nullptr) {
+        const bool isIn = (epDesc->bEndpointAddress & kIOUSBEndpointDescriptorDirection) != 0;
+        const bool isBulk =
+            (epDesc->bmAttributes & kIOUSBEndpointDescriptorTransferType) ==
+            kIOUSBEndpointDescriptorTransferTypeBulk;
+        if (!isBulk) {
+            continue;
+        }
+        if (isIn && !IVARS->inPipe) {
+            ret = IVARS->dataInterface->CopyPipe(epDesc->bEndpointAddress, &IVARS->inPipe);
+            if (ret != kIOReturnSuccess) {
+                IOUSBHostFreeDescriptor(configDesc);
+                return ret;
+            }
+        } else if (!isIn && !IVARS->outPipe) {
+            ret = IVARS->dataInterface->CopyPipe(epDesc->bEndpointAddress, &IVARS->outPipe);
+            if (ret != kIOReturnSuccess) {
+                IOUSBHostFreeDescriptor(configDesc);
+                return ret;
+            }
+        }
+    }
+
+    IOUSBHostFreeDescriptor(configDesc);
+    return (IVARS->inPipe && IVARS->outPipe) ? kIOReturnSuccess : kIOReturnNotFound;
+}
+
+kern_return_t
+TetherKitDriver::allocateTransferResources()
+{
+    for (int i = 0; i < N_IN_BUFS; i++) {
+        kern_return_t ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionIn, IN_BUF_SIZE, 0, &IVARS->inBufs[i]);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        uint64_t mappedAddress = 0;
+        uint64_t mappedLength = 0;
+        ret = IVARS->inBufs[i]->Map(0, 0, 0, 0, &mappedAddress, &mappedLength);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        IVARS->inBufAddrs[i] = mappedAddress;
+        ret = CreateActionDataReadComplete(sizeof(uint64_t), &IVARS->inActions[i]);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        *((uint64_t *) IVARS->inActions[i]->GetReference()) = static_cast<uint64_t>(i);
+    }
+
+    for (int i = 0; i < N_OUT_BUFS; i++) {
+        kern_return_t ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionOut, OUT_BUF_SIZE, 0, &IVARS->outBufs[i]);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        uint64_t mappedAddress = 0;
+        uint64_t mappedLength = 0;
+        ret = IVARS->outBufs[i]->Map(0, 0, 0, 0, &mappedAddress, &mappedLength);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        IVARS->outBufAddrs[i] = mappedAddress;
+        ret = CreateActionDataWriteComplete(sizeof(uint64_t), &IVARS->outActions[i]);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        *((uint64_t *) IVARS->outActions[i]->GetReference()) = static_cast<uint64_t>(i);
+    }
+
+    IVARS->numFreeOutBufs = N_OUT_BUFS;
+    return kIOReturnSuccess;
+}
+
+kern_return_t
+TetherKitDriver::setupNetworkInterface()
+{
+    IOUserNetworkPacketBufferPoolOptions poolOptions = {};
+    poolOptions.packetCount = PACKET_POOL_CAPACITY;
+    poolOptions.bufferCount = PACKET_POOL_CAPACITY;
+    poolOptions.bufferSize = IN_BUF_SIZE;
+    poolOptions.maxBuffersPerPacket = 1;
+    poolOptions.poolFlags = PoolFlagMapToDext | PoolFlagIODirectionIn | PoolFlagIODirectionOut;
+
+    kern_return_t ret = IOUserNetworkPacketBufferPool::CreateWithOptions(
+        this,
+        "com.prostec.tetherkit.pktpool",
+        &poolOptions,
+        &IVARS->pktPool);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    IOUserNetworkTxSubmissionQueue * txQueue = IOUserNetworkTxSubmissionQueue::withPoolAndServiceClass(
+        IVARS->pktPool,
+        kIOUserNetworkPacketServiceClassBE,
+        PACKET_QUEUE_DEPTH,
+        0,
+        this,
+        queryTxFreeSpace,
+        dequeueTxPackets);
+    if (!txQueue) {
+        return kIOReturnNoMemory;
+    }
+    IVARS->txQueue = txQueue;
+
+    // The Rx data path here is push-driven: USB completion handlers call
+    // EnqueuePacket()/requestEnqueue() directly when bulk-IN frames arrive.
+    // We therefore use the abstract IOUserNetworkPacketQueue base class with
+    // the documented OSTypeAlloc + init() pattern, plus SetPacketBufferPool /
+    // SetPacketDirection (both LOCALONLY accessors).  The factory helpers
+    // IOUserNetworkRxCompletionQueue::withPool() / RxSubmissionQueue::withPool()
+    // are designed for the demand-driven Skywalk Rx model with an EnqueueAction
+    // callback, which does not fit our producer-side flow.
+    IVARS->rxQueue = OSTypeAlloc(IOUserNetworkPacketQueue);
+    if (!IVARS->rxQueue || !IVARS->rxQueue->init()) {
+        return kIOReturnNoMemory;
+    }
+    IVARS->rxQueue->SetPacketBufferPool(IVARS->pktPool);
+    IVARS->rxQueue->SetPacketDirection(kIOUserNetworkPacketDirectionRx);
+
+    ether_addr_t mac;
+    __builtin_memcpy(mac.ether_addr_octet, IVARS->macAddr, 6);
+    IOUserNetworkPacketQueue * queues[] = { IVARS->txQueue, IVARS->rxQueue };
+    return RegisterEthernetInterface(mac, IVARS->pktPool, queues, 2);
+}
+
+uint32_t
+TetherKitDriver::availableTxBytes() const
+{
+    if (!IVARS->running) {
+        return 0;
+    }
+    return static_cast<uint32_t>(IVARS->numFreeOutBufs) * OUT_BUF_SIZE;
+}
+
+void
+TetherKitDriver::pumpTxQueue()
+{
+    if (!IVARS->running || !IVARS->txQueue || IVARS->numFreeOutBufs <= 0) {
+        return;
+    }
+    IOReturn ret = IVARS->txQueue->requestDequeue();
+    if (ret != kIOReturnSuccess && ret != kIOReturnNotReady) {
+        LOG_ERROR("requestDequeue failed: %08x", ret);
+    }
+}
+
+kern_return_t
+TetherKitDriver::scheduleInboundReads()
+{
+    for (int i = 0; i < N_IN_BUFS; i++) {
+        kern_return_t ret = IVARS->inPipe->AsyncIO(IVARS->inBufs[i], IN_BUF_SIZE, IVARS->inActions[i], 0);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t
+TetherKitDriver::SetInterfaceEnable_Impl(bool isEnable)
+{
+    if (isEnable) {
+        pumpTxQueue();
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t
+TetherKitDriver::SetPromiscuousModeEnable_Impl(bool enable)
+{
+    (void) enable;
+    return kIOReturnSuccess;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+kern_return_t
+TetherKitDriver::SetMulticastAddresses_Impl(const IOUserNetworkMACAddress * addresses,
+                                            uint32_t count)
+{
+    (void) addresses;
+    (void) count;
+    return kIOReturnSuccess;
+}
+#pragma clang diagnostic pop
+
+kern_return_t
+TetherKitDriver::SetAllMulticastModeEnable_Impl(bool enable)
+{
+    (void) enable;
+    return kIOReturnSuccess;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+kern_return_t
+TetherKitDriver::SelectMediaType_Impl(IOUserNetworkMediaType mediaType)
+{
+    (void) mediaType;
+    return kIOReturnSuccess;
+}
+#pragma clang diagnostic pop
+
+kern_return_t
+TetherKitDriver::SetWakeOnMagicPacketEnable_Impl(bool enable)
+{
+    (void) enable;
+    return kIOReturnSuccess;
+}
+
+uint32_t
+TetherKitDriver::consumeTxPackets(IOUserNetworkPacket ** packets, uint32_t packetCount)
+{
+    if (!IVARS->running || !packets || packetCount == 0) {
+        return 0;
+    }
+
+    uint32_t consumed = 0;
+    while (consumed < packetCount) {
+        if (IVARS->numFreeOutBufs <= 0) {
+            break;
+        }
+
+        IOUserNetworkPacket * pkt = packets[consumed];
+        if (!pkt) {
+            break;
+        }
+
+        const uint32_t ethLen = pkt->getDataLength();
+        const uint32_t totalLen = ethLen + static_cast<uint32_t>(sizeof(rndis_data_hdr));
+        if (totalLen > IVARS->maxOutTransferSize) {
+            pkt->release();
+            packets[consumed] = nullptr;
+            consumed++;
+            continue;
+        }
+
+        const int bufferIndex = IVARS->outBufStack[IVARS->numFreeOutBufs - 1];
+        uint8_t * bufPtr = reinterpret_cast<uint8_t *>(IVARS->outBufAddrs[bufferIndex]);
+        rndis_data_hdr * hdr = reinterpret_cast<rndis_data_hdr *>(bufPtr);
+        __builtin_memset(hdr, 0, sizeof(*hdr));
+        hdr->msg_type = RNDIS_MSG_PACKET;
+        hdr->msg_len = cpu_to_le32(totalLen);
+        hdr->data_offset = RNDIS_DATA_HDR_DATA_OFFSET;
+        hdr->data_len = cpu_to_le32(ethLen);
+
+        const uint64_t packetDataAddress = pkt->getDataVirtualAddress();
+        __builtin_memcpy(bufPtr + sizeof(rndis_data_hdr),
+                         reinterpret_cast<const void *>(packetDataAddress),
+                         ethLen);
+
+        IVARS->numFreeOutBufs--;
+        IVARS->outBufs[bufferIndex]->SetLength(totalLen);
+        kern_return_t ret = IVARS->outPipe->AsyncIO(IVARS->outBufs[bufferIndex],
+                                                    totalLen,
+                                                    IVARS->outActions[bufferIndex],
+                                                    0);
+        if (ret != kIOReturnSuccess) {
+            IVARS->outBufStack[IVARS->numFreeOutBufs] = static_cast<uint8_t>(bufferIndex);
+            IVARS->numFreeOutBufs++;
+            if (!isUsbGoneStatus(ret)) {
+                LOG_ERROR("AsyncIO(OUT #%d) failed: %08x", bufferIndex, ret);
+            }
+            break;
+        }
+
+        pkt->release();
+        packets[consumed] = nullptr;
+        consumed++;
+    }
+
+    return consumed;
+}
+
+void
+TetherKitDriver::DataReadComplete_Impl(OSAction * action,
+                                       IOReturn status,
+                                       uint32_t actualByteCount,
+                                       uint64_t /* completionTimestamp */)
+{
+    if (!IVARS->running || isUsbGoneStatus(status)) {
+        return;
+    }
+
+    int bufferIndex = static_cast<int>(*((uint64_t *) action->GetReference()));
+    if (status == kIOReturnSuccess && actualByteCount > 0) {
+        processInboundBuffer(reinterpret_cast<const uint8_t *>(IVARS->inBufAddrs[bufferIndex]),
+                             actualByteCount);
+    }
+
+    kern_return_t ret = IVARS->inPipe->AsyncIO(IVARS->inBufs[bufferIndex], IN_BUF_SIZE, action, 0);
+    if (ret != kIOReturnSuccess && !isUsbGoneStatus(ret)) {
+        LOG_ERROR("DataReadComplete: re-arm AsyncIO failed: %08x", ret);
+    }
+}
+
+void
+TetherKitDriver::processInboundBuffer(const uint8_t * buf, uint32_t size)
+{
+    while (size > 0) {
+        if (size < sizeof(rndis_data_hdr)) {
+            LOG_ERROR("processInboundBuffer: truncated header (%u bytes)", size);
+            return;
+        }
+
+        const rndis_data_hdr * hdr = reinterpret_cast<const rndis_data_hdr *>(buf);
+        const uint32_t msgLen = le32_to_cpu(hdr->msg_len);
+        const uint32_t dataOfs = le32_to_cpu(hdr->data_offset);
+        const uint32_t dataLen = le32_to_cpu(hdr->data_len);
+
+        if (hdr->msg_type != RNDIS_MSG_PACKET || msgLen > size || msgLen < sizeof(rndis_data_hdr)) {
+            LOG_ERROR("processInboundBuffer: bad msg_type/msgLen (type=%u len=%u avail=%u)", hdr->msg_type, msgLen, size);
+            return;
+        }
+        if (dataOfs > msgLen || 8u > msgLen - dataOfs || dataLen > msgLen - 8u - dataOfs) {
+            LOG_ERROR("processInboundBuffer: data offset/length out of bounds (ofs=%u len=%u msgLen=%u)", dataOfs, dataLen, msgLen);
+            return;
+        }
+
+        const uint8_t * ethPayload = buf + 8u + dataOfs;
+        IOUserNetworkPacket * receivedPacket = nullptr;
+        IOReturn ret = IVARS->pktPool->allocatePacket(&receivedPacket);
+        if (ret == kIOReturnSuccess && receivedPacket) {
+            uint64_t packetDataAddress = receivedPacket->getDataVirtualAddress();
+            __builtin_memcpy(reinterpret_cast<void *>(packetDataAddress), ethPayload, dataLen);
+            receivedPacket->setDataLength(dataLen);
+            IVARS->rxQueue->EnqueuePacket(receivedPacket);
+            receivedPacket->release();
+        }
+
+        size -= msgLen;
+        buf += msgLen;
+    }
+
+    IVARS->rxQueue->requestEnqueue();
+}
+
+void
+TetherKitDriver::DataWriteComplete_Impl(OSAction * action,
+                                        IOReturn status,
+                                        uint32_t /* actualByteCount */,
+                                        uint64_t /* completionTimestamp */)
+{
+    if (!IVARS->running || isUsbGoneStatus(status)) {
+        return;
+    }
+    int bufferIndex = static_cast<int>(*((uint64_t *) action->GetReference()));
+    if (IVARS->numFreeOutBufs < N_OUT_BUFS) {
+        IVARS->outBufStack[IVARS->numFreeOutBufs] = static_cast<uint8_t>(bufferIndex);
+        IVARS->numFreeOutBufs++;
+    }
+    pumpTxQueue();
+}
+
+kern_return_t
+TetherKitDriver::rndisCommand(uint32_t msgLen)
+{
+    if (!IVARS->commInterface || !IVARS->cmdBuf) {
+        return kIOReturnError;
+    }
+
+    uint64_t bufAddr = 0;
+    uint64_t mappedLen = 0;
+    kern_return_t ret = IVARS->cmdBuf->Map(0, 0, 0, 0, &bufAddr, &mappedLen);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    rndis_msg_hdr * hdr = reinterpret_cast<rndis_msg_hdr *>(bufAddr);
+    if (le32_to_cpu(hdr->msg_len) != msgLen) {
+        LOG_ERROR("rndisCommand: header msgLen %u != expected %u", le32_to_cpu(hdr->msg_len), msgLen);
+        return kIOReturnBadArgument;
+    }
+    if (hdr->msg_type != RNDIS_MSG_HALT && hdr->msg_type != RNDIS_MSG_RESET) {
+        uint32_t xid = IVARS->rndisXid++;
+        if (xid == 0) {
+            xid = IVARS->rndisXid++;
+        }
+        hdr->request_id = cpu_to_le32(xid);
+    }
+
+    const uint32_t requestType = hdr->msg_type;
+    const uint32_t requestId = hdr->request_id;
+    const uint32_t requestLen = le32_to_cpu(hdr->msg_len);
+
+    uint16_t bytesSent = 0;
+    ret = IVARS->commInterface->DeviceRequest(
+        kIOUSBDeviceRequestDirectionOut | kIOUSBDeviceRequestTypeClass | kIOUSBDeviceRequestRecipientInterface,
+        USB_CDC_SEND_ENCAPSULATED_COMMAND,
+        0,
+        static_cast<uint16_t>(IVARS->commIfNumber),
+        static_cast<uint16_t>(requestLen),
+        IVARS->cmdBuf,
+        &bytesSent,
+        kTimeoutMs);
+    if (ret != kIOReturnSuccess || static_cast<uint32_t>(bytesSent) != requestLen) {
+        return ret != kIOReturnSuccess ? ret : kIOReturnUnderrun;
+    }
+
+    for (int attempt = 0; attempt < kMaxAttempts; attempt++) {
+        uint16_t bytesReceived = 0;
+        ret = IVARS->commInterface->DeviceRequest(
+            kIOUSBDeviceRequestDirectionIn | kIOUSBDeviceRequestTypeClass | kIOUSBDeviceRequestRecipientInterface,
+            USB_CDC_GET_ENCAPSULATED_RESPONSE,
+            0,
+            static_cast<uint16_t>(IVARS->commIfNumber),
+            static_cast<uint16_t>(RNDIS_CMD_BUF_SZ),
+            IVARS->cmdBuf,
+            &bytesReceived,
+            kTimeoutMs);
+        if (ret != kIOReturnSuccess) {
+            return ret;
+        }
+        if (static_cast<uint32_t>(bytesReceived) < kMinResponseBytes) {
+            IOSleep(kRetryDelayMs);
+            continue;
+        }
+
+        const uint32_t expectedResponseType = requestType | RNDIS_MSG_COMPLETION;
+        if (hdr->msg_type != expectedResponseType) {
+            IOSleep(kRetryDelayMs);
+            continue;
+        }
+        if (hdr->request_id != requestId) {
+            IOSleep(kRetryDelayMs);
+            continue;
+        }
+        if (hdr->status != RNDIS_STATUS_SUCCESS) {
+            return kIOReturnIOError;
+        }
+        if (le32_to_cpu(hdr->msg_len) != static_cast<uint32_t>(bytesReceived)) {
+            return kIOReturnIOError;
+        }
+        return kIOReturnSuccess;
+    }
+
+    return kIOReturnTimeout;
+}
+
+kern_return_t
+TetherKitDriver::rndisInit()
+{
+    uint64_t bufAddr = 0;
+    uint64_t bufLen = 0;
+    kern_return_t ret = IVARS->cmdBuf->Map(0, 0, 0, 0, &bufAddr, &bufLen);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    rndis_init * initMsg = reinterpret_cast<rndis_init *>(bufAddr);
+    __builtin_memset(initMsg, 0, sizeof(*initMsg));
+    initMsg->msg_type = RNDIS_MSG_INIT;
+    initMsg->msg_len = cpu_to_le32(static_cast<uint32_t>(sizeof(rndis_init)));
+    initMsg->major_version = cpu_to_le32(1);
+    initMsg->minor_version = cpu_to_le32(0);
+    initMsg->max_transfer_size = cpu_to_le32(IN_BUF_SIZE);
+
+    ret = rndisCommand(static_cast<uint32_t>(sizeof(rndis_init)));
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    const rndis_init_c * initC = reinterpret_cast<const rndis_init_c *>(bufAddr);
+    uint32_t devMax = le32_to_cpu(initC->max_transfer_size);
+    IVARS->maxOutTransferSize = (devMax < OUT_BUF_SIZE) ? devMax : OUT_BUF_SIZE;
+    return kIOReturnSuccess;
+}
+
+kern_return_t
+TetherKitDriver::rndisQuery(uint32_t oid,
+                            uint32_t inLen,
+                            const uint8_t ** outData,
+                            uint32_t * outLen)
+{
+    uint64_t bufAddr = 0;
+    uint64_t bufLen = 0;
+    kern_return_t ret = IVARS->cmdBuf->Map(0, 0, 0, 0, &bufAddr, &bufLen);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    rndis_query * queryMsg = reinterpret_cast<rndis_query *>(bufAddr);
+    __builtin_memset(queryMsg, 0, sizeof(*queryMsg) + inLen);
+    queryMsg->msg_type = RNDIS_MSG_QUERY;
+    queryMsg->msg_len = cpu_to_le32(static_cast<uint32_t>(sizeof(*queryMsg) + inLen));
+    queryMsg->oid = oid;
+    queryMsg->len = cpu_to_le32(inLen);
+    queryMsg->offset = cpu_to_le32(20);
+
+    ret = rndisCommand(static_cast<uint32_t>(sizeof(rndis_query) + inLen));
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    const rndis_query_c * queryResponse = reinterpret_cast<const rndis_query_c *>(bufAddr);
+    const uint32_t responseOffset = le32_to_cpu(queryResponse->offset);
+    const uint32_t responseLen = le32_to_cpu(queryResponse->len);
+    const uint32_t responseMsgLen = le32_to_cpu(queryResponse->msg_len);
+    if ((8u + responseOffset + responseLen) > responseMsgLen ||
+        (8u + responseOffset + responseLen) > RNDIS_CMD_BUF_SZ) {
+        return kIOReturnIOError;
+    }
+
+    const uint8_t * responseBase = reinterpret_cast<const uint8_t *>(&queryResponse->request_id);
+    *outData = responseBase + responseOffset;
+    *outLen = responseLen;
+    return kIOReturnSuccess;
+}
+
+kern_return_t
+TetherKitDriver::rndisSetPacketFilter(uint32_t filter)
+{
+    if (!IVARS->cmdBuf) {
+        return kIOReturnNotReady;
+    }
+
+    uint64_t bufAddr = 0;
+    uint64_t bufLen = 0;
+    kern_return_t ret = IVARS->cmdBuf->Map(0, 0, 0, 0, &bufAddr, &bufLen);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+
+    rndis_set * setMsg = reinterpret_cast<rndis_set *>(bufAddr);
+    __builtin_memset(setMsg, 0, sizeof(*setMsg) + sizeof(uint32_t));
+    setMsg->msg_type = RNDIS_MSG_SET;
+    setMsg->msg_len = cpu_to_le32(static_cast<uint32_t>(sizeof(*setMsg) + 4));
+    setMsg->oid = OID_GEN_CURRENT_PACKET_FILTER;
+    setMsg->len = cpu_to_le32(4);
+    setMsg->offset = cpu_to_le32(static_cast<uint32_t>(sizeof(*setMsg) - 8));
+    *reinterpret_cast<uint32_t *>(setMsg + 1) = filter;
+
+    return rndisCommand(static_cast<uint32_t>(sizeof(rndis_set) + 4));
+}
+
+kern_return_t
+TetherKitDriver::queryMacAddress()
+{
+    const uint8_t * data = nullptr;
+    uint32_t outLen = 0;
+
+    kern_return_t ret = rndisQuery(OID_802_3_PERMANENT_ADDRESS, 0, &data, &outLen);
+    if (ret != kIOReturnSuccess || outLen < 6 || !data) {
+        ret = rndisQuery(OID_802_3_CURRENT_ADDRESS, 0, &data, &outLen);
+        if (ret != kIOReturnSuccess || outLen < 6 || !data) {
+            return kIOReturnIOError;
+        }
+    }
+
+    __builtin_memcpy(IVARS->macAddr, data, 6);
+    return kIOReturnSuccess;
+}

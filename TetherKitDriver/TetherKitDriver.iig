@@ -1,0 +1,214 @@
+/* TetherKitDriver.iig
+ * IIG interface definition for TetherKitDriver DriverKit extension.
+ * HoRNDIS — RNDIS USB tethering driver for macOS
+ *
+ *   Copyright (c) 2012 Joshua Wise.
+ *   Copyright (c) 2018 Mikhail Iakhiaev
+ *
+ * Ported to DriverKit by Prostec Labs, 2026.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+/*
+ * ARCHITECTURE OVERVIEW
+ * =====================
+ * TetherKitDriver extends IOUserNetworkEthernet (NetworkingDriverKit) and is
+ * matched against IOUSBHostInterface (USBDriverKit) by the three personalities
+ * in Info.plist.  The data-path layout (DriverKit25):
+ *
+ *   macOS network stack
+ *        │   ▲
+ *        │   │  TxDataAvailable (IODataQueueDispatchSource) / rxQueue->requestEnqueue
+ *        ▼   │
+ *   IOUserNetworkEthernet (base)
+ *        │
+ *        │  TetherKitDriver
+ *        │
+ *  ┌─────┴──────────────────────────┐
+ *  │  fCommInterface (control, ep0) │  SEND/GET_ENCAPSULATED for RNDIS init
+ *  │  fDataInterface  (bulk IN/OUT) │  Ethernet frames wrapped in RNDIS headers
+ *  └────────────────────────────────┘
+ *
+ * The IIG compiler generates:
+ *   TetherKitDriver.h        — C++ dispatch-table interface (included by .cpp)
+ *   TetherKitDriver.iig.cpp  — Dispatch-table implementation (linked into dext)
+ *
+ * DriverKit25 API changes vs the original DriverKit22 design:
+ *   - Init/Free are LOCALONLY C++ overrides, not IIG methods.
+ *   - TxPacketsAvailable removed; TX is driven by IOUserNetworkTxSubmissionQueue
+ *     via a DequeueAction callback passed to withPool() — no IIG method needed.
+ *   - SetHardwareAddress replaced by getHardwareAddress/setHardwareAddress (LOCALONLY).
+ *   - SetPromiscuousMode renamed to SetPromiscuousModeEnable.
+ *   - SetMulticastAddresses signature uses IOUserNetworkMACAddress.
+ *   - registerEthernetInterface takes (macAddr, queues[], numQueues, txPool, rxPool).
+ *   - reportLinkStatus replaces SetLinkStatus.
+ *
+ * BUILD NOTE
+ * ==========
+ * The project build settings must include IIG_PREPROCESSOR_DEFINITIONS = __IIG=1
+ * (set in the TetherKitDriver target's build settings).  This passes -D__IIG=1
+ * to the iig tool's parse-pass clang so that OSObject.iig's #if __IIG stub fires
+ * and registers OSMetaClassBase in the iig class registry.  The Xcode iig xcspec
+ * defaults this setting to __IIG=1, but it was previously overridden to empty.
+ */
+
+#ifndef TETHERKITDRIVER_IIG
+#define TETHERKITDRIVER_IIG
+
+#include <DriverKit/IOService.iig>
+#include <NetworkingDriverKit/IOUserNetworkEthernet.iig>
+#include <DriverKit/IOBufferMemoryDescriptor.iig>
+#include <DriverKit/OSAction.iig>
+// IOUSBHostPipe is a KERNEL iig class that must be registered in the iig class
+// registry for TYPE(IOUSBHostPipe::CompleteAsyncIO) to resolve correctly.
+#include <USBDriverKit/IOUSBHostPipe.iig>
+
+// Forward declarations — full headers included in the .cpp implementation.
+class IOUSBHostInterface;
+
+// IOUserNetworkEthernet still declares SetMulticastAddresses/SelectMediaType
+// as pure-virtual NDK_21-deprecated overrides that take the deprecated
+// IOUserNetworkMACAddress / IOUserNetworkMediaType argument types.  We must
+// override them, so suppress the deprecation warning for the entire class
+// declaration (the generated _Methods/_VirtualMethods macro expansions
+// reference those types too).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+/// TetherKitDriver — DriverKit extension that provides RNDIS USB tethering.
+///
+/// Matches IOUSBHostInterface (the RNDIS control interface).  On Start it
+/// opens the control interface, finds the adjacent CDC-Data interface, opens
+/// its bulk-IN and bulk-OUT pipes, runs the RNDIS handshake, then registers
+/// the Ethernet interface with NetworkingDriverKit.
+///
+class TetherKitDriver : public IOUserNetworkEthernet
+{
+public:
+    // -----------------------------------------------------------------------
+    // OSObject lifecycle — LOCALONLY C++ overrides (not IIG-dispatched).
+    // init() allocates and zeroes the ivars struct; free() releases it.
+    // -----------------------------------------------------------------------
+    virtual bool init() override LOCALONLY;
+    virtual void free() override LOCALONLY;
+
+    // -----------------------------------------------------------------------
+    // IOService lifecycle — overridden via IIG dispatch.
+    // -----------------------------------------------------------------------
+
+    /// Called by the dext runtime after matching.  Opens USB interfaces,
+    /// runs RNDIS initialisation, registers the Ethernet interface.
+    virtual kern_return_t
+    Start(IOService * provider) override;
+
+    /// Called when the provider is being terminated (USB disconnect, or
+    /// tethering toggled off by the phone).  Cancels pending I/O, closes
+    /// USB, deregisters the network interface.
+    virtual kern_return_t
+    Stop(IOService * provider) override;
+
+    // -----------------------------------------------------------------------
+    // IOUserNetworkEthernet pure-virtual overrides (DriverKit25 API).
+    // All are deprecated at NDK_21+ in favour of lowercase LOCALONLY variants,
+    // but must still be overridden because the base declares them as = 0.
+    // -----------------------------------------------------------------------
+
+    /// Enable or disable the network interface.
+    virtual kern_return_t
+    SetInterfaceEnable(bool isEnable) override;
+
+    /// Enable or disable promiscuous mode.  Android RNDIS devices ignore this;
+    /// we keep RNDIS_DEFAULT_FILTER regardless.
+    virtual kern_return_t
+    SetPromiscuousModeEnable(bool enable) override;
+
+    /// Update the multicast address filter.  We use ALL_MULTICAST unconditionally.
+    virtual kern_return_t
+    SetMulticastAddresses(const IOUserNetworkMACAddress * addresses,
+                          uint32_t                       count) override;
+
+    /// Enable or disable all-multicast mode.
+    virtual kern_return_t
+    SetAllMulticastModeEnable(bool enable) override;
+
+    /// Select the active media type (not meaningful for RNDIS; no-op).
+    virtual kern_return_t
+    SelectMediaType(IOUserNetworkMediaType mediaType) override;
+
+    /// Enable or disable wake-on-magic-packet (not supported by RNDIS; no-op).
+    virtual kern_return_t
+    SetWakeOnMagicPacketEnable(bool enable) override;
+
+    // -----------------------------------------------------------------------
+    // Async USB completion callbacks.
+    // Declared with TYPE() so the IIG compiler generates the OSAction trampoline.
+    // -----------------------------------------------------------------------
+
+    /// Completion called when a bulk-IN transfer finishes.
+    /// @param action              The OSAction that was passed to AsyncIO.
+    /// @param status              IOReturn status of the completed transfer.
+    /// @param actualByteCount     Number of bytes actually received.
+    /// @param completionTimestamp Hardware timestamp (unused).
+    virtual void
+    DataReadComplete(OSAction * action,
+                     IOReturn   status,
+                     uint32_t   actualByteCount,
+                     uint64_t   completionTimestamp) TYPE(IOUSBHostPipe::CompleteAsyncIO);
+
+    /// Completion called when a bulk-OUT transfer finishes.
+    virtual void
+    DataWriteComplete(OSAction * action,
+                      IOReturn   status,
+                      uint32_t   actualByteCount,
+                      uint64_t   completionTimestamp) TYPE(IOUSBHostPipe::CompleteAsyncIO);
+
+private:
+    // -----------------------------------------------------------------------
+    // Private helper methods — LOCALONLY (C++ only, no IIG dispatch table
+    // entry).  Must be declared here so the compiler accepts out-of-line
+    // definitions in TetherKitDriver.cpp.
+    // -----------------------------------------------------------------------
+
+    // USB setup
+    virtual kern_return_t openDataInterface() LOCALONLY;
+    virtual kern_return_t allocateTransferResources() LOCALONLY;
+    virtual kern_return_t setupNetworkInterface() LOCALONLY;
+    virtual kern_return_t scheduleInboundReads() LOCALONLY;
+    virtual void          pumpTxQueue() LOCALONLY;
+public:
+    // Called by the static C trampolines queryTxFreeSpace/dequeueTxPackets
+    // passed to IOUserNetworkTxSubmissionQueue::withPoolAndServiceClass().
+    virtual uint32_t      availableTxBytes() const LOCALONLY;
+    virtual uint32_t      consumeTxPackets(IOUserNetworkPacket ** packets,
+                                           uint32_t                packetCount) LOCALONLY;
+private:
+    virtual void          processInboundBuffer(const uint8_t * buf,
+                                               uint32_t        size) LOCALONLY;
+
+    // RNDIS control channel
+    // msgLen is the caller's expected size of the request currently in cmdBuf;
+    // it is sanity-checked against the on-the-wire hdr->msg_len before the
+    // SEND_ENCAPSULATED_COMMAND is issued.
+    virtual kern_return_t rndisCommand(uint32_t msgLen) LOCALONLY;
+    virtual kern_return_t rndisInit() LOCALONLY;
+    virtual kern_return_t rndisQuery(uint32_t         oid,
+                                     uint32_t         inLen,
+                                     const uint8_t ** outData,
+                                     uint32_t *       outLen) LOCALONLY;
+    virtual kern_return_t rndisSetPacketFilter(uint32_t filter) LOCALONLY;
+    virtual kern_return_t queryMacAddress() LOCALONLY;
+
+};
+
+#pragma clang diagnostic pop
+
+#endif /* TETHERKITDRIVER_IIG */

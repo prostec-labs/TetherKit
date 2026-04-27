@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    TetherKitDriver.entitlements
+    DriverKit entitlements for the TetherKit dext.
+
+    IMPORTANT — Apple approval required before these work:
+    ======================================================
+    Both com.apple.developer.driverkit and
+    com.apple.developer.driverkit.family.networking require individual approval
+    from Apple via the DriverKit entitlement request form:
+        https://developer.apple.com/contact/request/system-extension/
+
+    During local development you can bypass entitlement checks with SIP disabled
+    and systemextensionsctl developer on.  See README.md → Development Setup.
+
+    All three USB match dictionaries here MUST match the IOKitPersonalities in
+    Info.plist exactly, or the kernel will refuse to load the dext.
+-->
+<plist version="1.0">
+<dict>
+
+    <!-- Core DriverKit entitlement — required for any dext. -->
+    <key>com.apple.developer.driverkit</key>
+    <true/>
+
+    <!--
+        Networking family entitlement — required for IOUserNetworkEthernet.
+        Must be individually approved by Apple.
+    -->
+    <key>com.apple.developer.driverkit.family.networking</key>
+    <true/>
+
+    <!--
+        USB transport entitlement.
+        The array must contain one dictionary per IOKitPersonality that
+        matches on a USB interface.  Each dictionary must specify the
+        USB class/subclass/protocol of the matched interface.
+
+        Format per Apple TN3103 / DriverKit Release Notes:
+          Each dict may contain any combination of:
+            bDeviceClass / bDeviceSubClass / bDeviceProtocol
+            bInterfaceClass / bInterfaceSubClass / bInterfaceProtocol
+            idVendor / idProduct
+          Omitted keys act as wildcards.
+    -->
+    <key>com.apple.developer.driverkit.transport.usb</key>
+    <array>
+
+        <!--
+            Personality 1: Stock Android RNDIS
+            bInterfaceClass=224, bInterfaceSubClass=1, bInterfaceProtocol=3
+        -->
+        <dict>
+            <key>bInterfaceClass</key>
+            <integer>224</integer>
+            <key>bInterfaceSubClass</key>
+            <integer>1</integer>
+            <key>bInterfaceProtocol</key>
+            <integer>3</integer>
+        </dict>
+
+        <!--
+            Personality 2: RNDIS over Ethernet (Miscellaneous Device 0xEF)
+            bInterfaceClass=239, bInterfaceSubClass=4, bInterfaceProtocol=1
+        -->
+        <dict>
+            <key>bInterfaceClass</key>
+            <integer>239</integer>
+            <key>bInterfaceSubClass</key>
+            <integer>4</integer>
+            <key>bInterfaceProtocol</key>
+            <integer>1</integer>
+        </dict>
+
+        <!--
+            Personality 3: Linux USB Gadget RNDIS
+            bInterfaceClass=2, bInterfaceSubClass=2, bInterfaceProtocol=255
+        -->
+        <dict>
+            <key>bInterfaceClass</key>
+            <integer>2</integer>
+            <key>bInterfaceSubClass</key>
+            <integer>2</integer>
+            <key>bInterfaceProtocol</key>
+            <integer>255</integer>
+        </dict>
+
+    </array>
+
+    <!--
+        com.apple.security.app-sandbox is NOT applicable to dexts.
+        Dexts run in the dext sandbox enforced by the kernel, not the
+        standard App Sandbox.  Do not add the sandbox entitlement here.
+    -->
+
+</dict>
+</plist>

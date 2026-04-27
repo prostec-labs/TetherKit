@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# pre-commit: catch common secrets before they hit the repo.
+# Install once: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+FAIL=0
+
+# ── 1. Apple Developer Team ID ────────────────────────────────────────────────
+# Flag DEVELOPMENT_TEAM set to an actual value in .xcconfig or .pbxproj files.
+# Ignores shell scripts, markdown, and comment lines.
+TEAM_HITS=$(git diff --cached --name-only | grep -E '\.(xcconfig|pbxproj)$' | while read -r f; do
+    git diff --cached -- "$f" | grep -E '^\+[^+].*DEVELOPMENT_TEAM\s*=\s*[A-Z0-9]{10}' || true
+done)
+if [ -n "$TEAM_HITS" ]; then
+    echo "BLOCKED: Apple Developer Team ID in a config file."
+    echo "  Keep DEVELOPMENT_TEAM blank in Configs/Shared.xcconfig."
+    echo "  Set it locally — never commit it."
+    FAIL=1
+fi
+
+# ── 2. Provisioning profile UUIDs in build config files ───────────────────────
+UUID_HITS=$(git diff --cached --name-only | grep -E '\.(xcconfig|pbxproj|plist|entitlements)$' | while read -r f; do
+    git diff --cached -- "$f" | grep -E '^\+[^+].*PROVISIONING_PROFILE_SPECIFIER\s*=\s*[0-9a-f-]{36}' || true
+done)
+if [ -n "$UUID_HITS" ]; then
+    echo "BLOCKED: Provisioning profile UUID in a config file."
+    FAIL=1
+fi
+
+# ── 3. Private key / certificate material ────────────────────────────────────
+KEY_HITS=$(git diff --cached --unified=0 | grep -E '^\+[^+].*(BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY|BEGIN CERTIFICATE)' || true)
+if [ -n "$KEY_HITS" ]; then
+    echo "BLOCKED: Private key or certificate material detected."
+    FAIL=1
+fi
+
+# ── 4. CI credential keywords in YAML / env files ────────────────────────────
+CI_HITS=$(git diff --cached --name-only | grep -E '\.(yml|yaml|env|sh)$' | while read -r f; do
+    git diff --cached -- "$f" | grep -iE '^\+[^+].*(APPLE_ID|APP_PASSWORD|NOTARY_TEAM_ID)\s*[:=]\s*[^$({]' || true
+done)
+if [ -n "$CI_HITS" ]; then
+    echo "BLOCKED: Hardcoded CI credential (APPLE_ID / APP_PASSWORD / NOTARY_TEAM_ID)."
+    echo "  Use GitHub Actions secrets instead."
+    FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+    echo ""
+    echo "Commit blocked. Remove the sensitive values and try again."
+    echo "To override (false positive): git commit --no-verify"
+    exit 1
+fi
+
+exit 0

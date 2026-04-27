@@ -1,0 +1,19 @@
+// Shared.xcconfig
+// Shared build settings for TetherKit
+//
+// SETUP: Set your Apple Developer Team ID below.
+// You can find your Team ID in the Apple Developer portal at
+//   https://developer.apple.com/account  → Membership → Team ID
+// Example: DEVELOPMENT_TEAM = AB12CD34EF
+//
+// After setting this, both the loader app and the dext target will pick it up.
+// You do NOT need to touch the Xcode project itself for team signing.
+
+DEVELOPMENT_TEAM =
+
+// Code signing identity for local development builds.
+// For distribution (notarization), change to "Apple Distribution".
+CODE_SIGN_IDENTITY = Apple Development
+
+// Style — set to Automatic for App Store / Developer ID submissions.
+CODE_SIGN_STYLE = Automatic
