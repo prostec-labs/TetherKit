@@ -582,6 +582,136 @@ TetherKitDriver::openDataInterface()
 }
 
 kern_return_t
+TetherKitDriver::openInterruptPipe()
+{
+    if (!IVARS->commInterface) {
+        return kIOReturnNotReady;
+    }
+
+    const IOUSBConfigurationDescriptor * cfgDesc =
+        IVARS->commInterface->CopyConfigurationDescriptor();
+    if (!cfgDesc) {
+        return kIOReturnError;
+    }
+    const IOUSBInterfaceDescriptor * commIfDesc =
+        IVARS->commInterface->GetInterfaceDescriptor(cfgDesc);
+    if (!commIfDesc) {
+        IOUSBHostFreeDescriptor(cfgDesc);
+        return kIOReturnError;
+    }
+
+    uint8_t intEpAddr = 0;
+    uint16_t intEpMps = 0;
+    {
+        uint8_t deviceSpeed = 0;
+        IOUSBHostDevice * speedDev = nullptr;
+        if (IVARS->commInterface->CopyDevice(&speedDev) == kIOReturnSuccess && speedDev) {
+            speedDev->GetSpeed(&deviceSpeed);
+            OSSafeReleaseNULL(speedDev);
+        }
+
+        const IOUSBEndpointDescriptor * ep = nullptr;
+        while ((ep = IOUSBGetNextEndpointDescriptor(
+                    cfgDesc,
+                    commIfDesc,
+                    reinterpret_cast<const IOUSBDescriptorHeader *>(ep))) != nullptr) {
+            const bool isIn = (ep->bEndpointAddress & kIOUSBEndpointDescriptorDirection) != 0;
+            const bool isInterrupt =
+                (ep->bmAttributes & kIOUSBEndpointDescriptorTransferType) ==
+                kIOUSBEndpointDescriptorTransferTypeInterrupt;
+            if (isIn && isInterrupt) {
+                intEpAddr = ep->bEndpointAddress;
+                intEpMps  = IOUSBGetEndpointMaxPacketSize(deviceSpeed, ep);
+                break;
+            }
+        }
+    }
+    IOUSBHostFreeDescriptor(cfgDesc);
+
+    if (intEpAddr == 0) {
+        // No interrupt-IN endpoint. Some Linux gadget RNDIS profiles omit it.
+        // Fall back to legacy poll-only rndisCommand path.
+        LOG_INFO("openInterruptPipe: no interrupt-IN endpoint; will poll EP0");
+        return kIOReturnSuccess;
+    }
+    if (intEpMps == 0) {
+        intEpMps = 16;
+    }
+
+    kern_return_t ret = IVARS->commInterface->CopyPipe(intEpAddr, &IVARS->intPipe);
+    if (ret != kIOReturnSuccess || !IVARS->intPipe) {
+        return ret != kIOReturnSuccess ? ret : kIOReturnError;
+    }
+
+    IVARS->intBufLen = intEpMps;
+    ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionIn,
+                                           IVARS->intBufLen, 0, &IVARS->intBuf);
+    if (ret != kIOReturnSuccess || !IVARS->intBuf) {
+        return ret != kIOReturnSuccess ? ret : kIOReturnNoMemory;
+    }
+    uint64_t mappedAddress = 0;
+    uint64_t mappedLength = 0;
+    ret = IVARS->intBuf->Map(0, 0, 0, 0, &mappedAddress, &mappedLength);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+    IVARS->intBufAddr = mappedAddress;
+
+    ret = CreateActionInterruptReadComplete(0, &IVARS->intAction);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t
+TetherKitDriver::armInterruptRead()
+{
+    if (!IVARS->intPipe || !IVARS->intBuf || !IVARS->intAction) {
+        return kIOReturnSuccess; // No pipe — silently fall back to polling.
+    }
+    // completionTimeoutMs MUST be 0 for interrupt endpoints.
+    kern_return_t ret = IVARS->intPipe->AsyncIO(IVARS->intBuf,
+                                                 IVARS->intBufLen,
+                                                 IVARS->intAction,
+                                                 0);
+    if (ret == kIOReturnSuccess) {
+        IVARS->intArmed = true;
+    } else if (!isUsbGoneStatus(ret)) {
+        LOG_ERROR("armInterruptRead: AsyncIO failed: %08x", ret);
+    }
+    return ret;
+}
+
+static constexpr uint32_t RNDIS_NOTIF_RESPONSE_AVAILABLE = 0x00000001;
+
+void
+TetherKitDriver::handleNotification(const uint8_t * buf, uint32_t len)
+{
+    if (len < 8 || !buf) {
+        return;
+    }
+    uint32_t code = (uint32_t) buf[0]
+                  | ((uint32_t) buf[1] << 8)
+                  | ((uint32_t) buf[2] << 16)
+                  | ((uint32_t) buf[3] << 24);
+    if (code == RNDIS_NOTIF_RESPONSE_AVAILABLE) {
+        IVARS->responseAvailable = true;
+        LOG_DEBUG("interrupt: RESPONSE_AVAILABLE");
+        return;
+    }
+    if (code == 0x4001000Bu) {
+        LOG_INFO("interrupt: MEDIA_CONNECT (link up)");
+        reportLinkStatus(kIOUserNetworkLinkStatusActive, 0);
+    } else if (code == 0x4001000Cu) {
+        LOG_INFO("interrupt: MEDIA_DISCONNECT (link down)");
+        reportLinkStatus(kIOUserNetworkLinkStatusInactive, 0);
+    } else {
+        LOG_DEBUG("interrupt: unknown notification code 0x%08x", code);
+    }
+}
+
+kern_return_t
 TetherKitDriver::allocateTransferResources()
 {
     for (int i = 0; i < N_IN_BUFS; i++) {
@@ -935,6 +1065,26 @@ TetherKitDriver::DataWriteComplete_Impl(OSAction * action,
         IVARS->numFreeOutBufs++;
     }
     pumpTxQueue();
+}
+
+void
+TetherKitDriver::InterruptReadComplete_Impl(OSAction * /* action */,
+                                            IOReturn status,
+                                            uint32_t actualByteCount,
+                                            uint64_t /* completionTimestamp */)
+{
+    IVARS->intArmed = false;
+
+    if (!IVARS->running || isUsbGoneStatus(status)) {
+        return;
+    }
+
+    if (status == kIOReturnSuccess && actualByteCount > 0) {
+        handleNotification(reinterpret_cast<const uint8_t *>(IVARS->intBufAddr),
+                           actualByteCount);
+    }
+
+    armInterruptRead();
 }
 
 kern_return_t
