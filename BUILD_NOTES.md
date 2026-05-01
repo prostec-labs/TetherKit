@@ -145,7 +145,7 @@ configured in Xcode Preferences → Accounts.
 Alternatively, use the command line:
 ```bash
 xcrun notarytool submit TetherKitLoader.zip \
-  --apple-id you@prostec.io \
+  --apple-id you@prostec.ai \
   --password "@keychain:AC_PASSWORD" \
   --team-id AB12CD34EF \
   --wait
