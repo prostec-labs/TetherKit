@@ -1159,7 +1159,11 @@ TetherKitDriver::rndisCommand(uint32_t msgLen)
 
     bool sawNotification = false;
     if (IVARS->intPipe) {
-        IVARS->responseAvailable = false; // arm for this command
+        // responseAvailable is a plain bool — safe without atomics because
+        // DriverKit serializes all _Impl callbacks and ExternalMethod calls
+        // on the same default queue. Do not add a concurrent dispatch queue
+        // without adding a memory fence here.
+        IVARS->responseAvailable = false;
         if (!IVARS->intArmed) {
             armInterruptRead();
         }
