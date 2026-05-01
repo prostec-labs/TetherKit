@@ -48,6 +48,20 @@
                ReferencedContainer = "container:TetherKit.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "0170DB107957423AAA8B0B20"
+               BuildableName = "TetherKitProtocolTests.xctest"
+               BlueprintName = "TetherKitProtocolTests"
+               ReferencedContainer = "container:TetherKit.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -63,6 +77,16 @@
                BlueprintIdentifier = "8F7F0C9097471E70AAAA241B"
                BuildableName = "TetherKitDriverTests.xctest"
                BlueprintName = "TetherKitDriverTests"
+               ReferencedContainer = "container:TetherKit.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "0170DB107957423AAA8B0B20"
+               BuildableName = "TetherKitProtocolTests.xctest"
+               BlueprintName = "TetherKitProtocolTests"
                ReferencedContainer = "container:TetherKit.xcodeproj">
             </BuildableReference>
          </TestableReference>

@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		314A9CE22E4D436AAA8A0200 /* RNDISProtocolCore.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EAE235EBD9B94992A8B6F3E7 /* RNDISProtocolCore.cpp */; };
+		49C860084491487AAB74C51E /* RNDISProtocolCore.h in Headers */ = {isa = PBXBuildFile; fileRef = 44829231645B45479A53DCB3 /* RNDISProtocolCore.h */; };
+		8A728FAF5BF2446EB7A2258D /* RNDISProtocolCore.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EAE235EBD9B94992A8B6F3E7 /* RNDISProtocolCore.cpp */; };
+		5E0708DC2207486AB85F00DF /* TetherKitProtocolTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 81E769E858E74E259AE7E377 /* TetherKitProtocolTests.mm */; };
 		146827E52F9D2EB000BFF930 /* NetworkingDriverKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA4142EF1B0A4D51D1036503 /* NetworkingDriverKit.framework */; };
 		146827E62F9D2EB000BFF930 /* NetworkingDriverKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = EA4142EF1B0A4D51D1036503 /* NetworkingDriverKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		146827E82F9D2EB200BFF930 /* USBDriverKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 35CA97A64D7868B79CD6CC74 /* USBDriverKit.framework */; };
@@ -59,6 +63,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		44829231645B45479A53DCB3 /* RNDISProtocolCore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RNDISProtocolCore.h; sourceTree = "<group>"; };
+		EAE235EBD9B94992A8B6F3E7 /* RNDISProtocolCore.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = RNDISProtocolCore.cpp; sourceTree = "<group>"; };
+		81E769E858E74E259AE7E377 /* TetherKitProtocolTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = TetherKitProtocolTests.mm; sourceTree = "<group>"; };
+		46756C62AE5940E586F45CF1 /* TetherKitProtocolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TetherKitProtocolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		35CA97A64D7868B79CD6CC74 /* USBDriverKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = USBDriverKit.framework; path = ../../../../DriverKit.platform/Developer/SDKs/DriverKit.sdk/System/DriverKit/System/Library/Frameworks/USBDriverKit.framework; sourceTree = SDKROOT; };
 		4604E54BE8C7429455E99ECE /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		7724F61F455FA7CE7B2BFF66 /* RNDISProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RNDISProtocol.h; sourceTree = "<group>"; };
@@ -104,6 +112,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1BD195506EED44B0993F4625 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -123,6 +138,7 @@
 				D9316C1A2EA4DE7304B978E4 /* TetherKitLoader */,
 				E609AAE40EA5CF76E22C82F1 /* TetherKitDriver */,
 				616A58DA5262901E63F04149 /* TetherKitDriverTests */,
+				6E29CCB7CE5C4EE5B7184ACE /* TetherKitProtocolTests */,
 				46AD1BE7F814664B9DFB171B /* Configs */,
 				5ADE8A4128725EB9150C196B /* Products */,
 				148627C92F9CDFB400BE0C06 /* Recovered References */,
@@ -143,6 +159,7 @@
 				C0AA5A9A54620EEAF57B90C2 /* TetherKitLoader.app */,
 				9EC3745A0508C2DCF88DA02A /* TetherKitDriver.dext */,
 				F430BB78B06133F7836B60AB /* TetherKitDriverTests.xctest */,
+				46756C62AE5940E586F45CF1 /* TetherKitProtocolTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -153,6 +170,14 @@
 				A938D1C5564D3E221936E8F8 /* TetherKitDriverTests.swift */,
 			);
 			path = TetherKitDriverTests;
+			sourceTree = "<group>";
+		};
+		6E29CCB7CE5C4EE5B7184ACE /* TetherKitProtocolTests */ = {
+			isa = PBXGroup;
+			children = (
+				81E769E858E74E259AE7E377 /* TetherKitProtocolTests.mm */,
+			);
+			path = TetherKitProtocolTests;
 			sourceTree = "<group>";
 		};
 		D9316C1A2EA4DE7304B978E4 /* TetherKitLoader */ = {
@@ -173,6 +198,8 @@
 				E3E496F413B1F7CC07C6AB5A /* TetherKitDriver.iig */,
 				E1298756AD30FFD66557AFFA /* TetherKitDriver.cpp */,
 				7724F61F455FA7CE7B2BFF66 /* RNDISProtocol.h */,
+				44829231645B45479A53DCB3 /* RNDISProtocolCore.h */,
+				EAE235EBD9B94992A8B6F3E7 /* RNDISProtocolCore.cpp */,
 				4604E54BE8C7429455E99ECE /* Info.plist */,
 				9AECC918FC6C3106BC38CC16 /* TetherKitDriver.entitlements */,
 			);
@@ -187,6 +214,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				7724F61F455FA7CE7B2BFF66A /* RNDISProtocol.h in Headers */,
+				49C860084491487AAB74C51E /* RNDISProtocolCore.h in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -246,6 +274,22 @@
 			productReference = 9EC3745A0508C2DCF88DA02A /* TetherKitDriver.dext */;
 			productType = "com.apple.product-type.driver-extension";
 		};
+		0170DB107957423AAA8B0B20 /* TetherKitProtocolTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A6A432CF2F44916AADD2044 /* Build configuration list for PBXNativeTarget "TetherKitProtocolTests" */;
+			buildPhases = (
+				523EEAD15A16453590062D8E /* Sources */,
+				1BD195506EED44B0993F4625 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TetherKitProtocolTests;
+			productName = TetherKitProtocolTests;
+			productReference = 46756C62AE5940E586F45CF1 /* TetherKitProtocolTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -266,6 +310,9 @@
 					D977FB92AED8574521344F00 = {
 						CreatedOnToolsVersion = 15.0;
 					};
+					0170DB107957423AAA8B0B20 = {
+						CreatedOnToolsVersion = 15.0;
+					};
 				};
 			};
 			buildConfigurationList = 4B2380CA9135CE36448D46F6 /* Build configuration list for PBXProject "TetherKit" */;
@@ -284,6 +331,7 @@
 				AE009D8E11433CB51C0EB4D7 /* TetherKitLoader */,
 				D977FB92AED8574521344F00 /* TetherKitDriver */,
 				8F7F0C9097471E70AAAA241B /* TetherKitDriverTests */,
+				0170DB107957423AAA8B0B20 /* TetherKitProtocolTests */,
 			);
 		};
 /* End PBXProject section */
@@ -313,6 +361,7 @@
 			files = (
 				E3E496F413B1F7CC07C6AB5AA /* TetherKitDriver.iig in Sources */,
 				E1298756AD30FFD66557AFFAA /* TetherKitDriver.cpp in Sources */,
+				314A9CE22E4D436AAA8A0200 /* RNDISProtocolCore.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -323,6 +372,15 @@
 				B725EB1BBD340461E0AB1B51A /* TetherKitLoaderApp.swift in Sources */,
 				7956D22DB416D6DED71BF3CFA /* ContentView.swift in Sources */,
 				C1337BB5C9DC59BD3186C745A /* SystemExtensionManager.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		523EEAD15A16453590062D8E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5E0708DC2207486AB85F00DF /* TetherKitProtocolTests.mm in Sources */,
+				8A728FAF5BF2446EB7A2258D /* RNDISProtocolCore.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -531,6 +589,40 @@
 			};
 			name = Release;
 		};
+		932EE0C3D586498BA105A18C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGNING_ALLOWED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/TetherKitDriver";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.prostec.tetherkit.protocoltests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		B2FFE6E38EC5448B96097404 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGNING_ALLOWED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/TetherKitDriver";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.prostec.tetherkit.protocoltests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
 		FA938DEA64902B71C445DFCA /* Release */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 8453DECD962D13E1DBD9ABFB /* Shared.xcconfig */;
@@ -617,6 +709,15 @@
 			buildConfigurations = (
 				A6270F0F27AFAACDAACF5382 /* Debug */,
 				DB4F42643B0CDB67A7FEDE82 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9A6A432CF2F44916AADD2044 /* Build configuration list for PBXNativeTarget "TetherKitProtocolTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				932EE0C3D586498BA105A18C /* Debug */,
+				B2FFE6E38EC5448B96097404 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

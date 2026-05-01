@@ -293,3 +293,23 @@ Replay historical logs (last 5 minutes):
 ```sh
 log show --last 5m --predicate 'process == "com.prostec.tetherkit.driver"'
 ```
+
+---
+
+## Running the protocol unit tests
+
+The `TetherKitProtocolTests` target compiles `RNDISProtocolCore.{h,cpp}`
+and `TetherKitProtocolTests.mm` against the `macosx` SDK with no
+DriverKit dependency. Run from the repo root:
+
+```sh
+xcodebuild test -project TetherKit.xcodeproj -scheme TetherKitDriver \
+  -destination 'platform=macOS' \
+  -only-testing:TetherKitProtocolTests \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+These tests do NOT need a connected device, an installed dext, or
+DriverKit entitlements. They exercise the wire-format math: struct
+sizes, multi-packet inbound coalescing, max_transfer_size clamping,
+and the multicast-bit MAC fixup.
