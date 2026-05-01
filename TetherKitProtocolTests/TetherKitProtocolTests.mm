@@ -108,6 +108,31 @@ static std::vector<uint8_t> makePacketMessage(const uint8_t * eth, uint32_t ethL
     XCTAssertEqual(got.size(), 0u);
 }
 
+- (void)testParseInboundBuffer_oversizedDataOfsRejected {
+    auto buf = makePacketMessage(nullptr, 0);
+    auto * hdr = reinterpret_cast<rndis_data_hdr *>(buf.data());
+    hdr->data_offset = cpu_to_le32(9999);
+    std::vector<CapturedPacket> got;
+    rndis::ParseResult r = rndis::parseInboundBuffer(buf.data(), (uint32_t)buf.size(), capture, &got);
+    XCTAssertEqual(r, rndis::ParseResult::INVALID_DATA_BOUNDS);
+    XCTAssertEqual(got.size(), 0u);
+}
+
+- (void)testParseInboundBuffer_nearOverflowSumRejected {
+    // data_offset and data_len individually pass the per-field checks but
+    // their sum 8 + data_offset + data_len wraps past msg_len if computed
+    // in uint32_t. The uint64_t cast in the bounds check must catch this.
+    auto buf = makePacketMessage(nullptr, 0);
+    auto * hdr = reinterpret_cast<rndis_data_hdr *>(buf.data());
+    const uint32_t msgLen = (uint32_t)buf.size(); // == sizeof(rndis_data_hdr) == 44
+    hdr->data_offset = cpu_to_le32(msgLen - 9u);  // 35 — within msgLen
+    hdr->data_len    = cpu_to_le32(msgLen - 9u);  // 35 — within msgLen; sum 8+35+35=78 > 44
+    std::vector<CapturedPacket> got;
+    rndis::ParseResult r = rndis::parseInboundBuffer(buf.data(), (uint32_t)buf.size(), capture, &got);
+    XCTAssertEqual(r, rndis::ParseResult::INVALID_DATA_BOUNDS);
+    XCTAssertEqual(got.size(), 0u);
+}
+
 - (void)testParseInboundBuffer_truncatedHeaderRejected {
     uint8_t tiny[7] = {};
     std::vector<CapturedPacket> got;

@@ -28,7 +28,7 @@ ParseResult parseInboundBuffer(const uint8_t * buf,
         }
         if (dataOfs > msgLen ||
             dataLen > msgLen ||
-            (8u + dataOfs + dataLen) > msgLen) {
+            ((uint64_t)8u + dataOfs + dataLen) > (uint64_t)msgLen) {
             return ParseResult::INVALID_DATA_BOUNDS;
         }
         if (dataLen > 0 && cb) {

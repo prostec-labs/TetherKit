@@ -666,18 +666,23 @@ TetherKitDriver::openInterruptPipe()
     ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionIn,
                                            IVARS->intBufLen, 0, &IVARS->intBuf);
     if (ret != kIOReturnSuccess || !IVARS->intBuf) {
+        OSSafeReleaseNULL(IVARS->intPipe);
         return ret != kIOReturnSuccess ? ret : kIOReturnNoMemory;
     }
     uint64_t mappedAddress = 0;
     uint64_t mappedLength = 0;
     ret = IVARS->intBuf->Map(0, 0, 0, 0, &mappedAddress, &mappedLength);
     if (ret != kIOReturnSuccess) {
+        OSSafeReleaseNULL(IVARS->intBuf);
+        OSSafeReleaseNULL(IVARS->intPipe);
         return ret;
     }
     IVARS->intBufAddr = mappedAddress;
 
     ret = CreateActionInterruptReadComplete(0, &IVARS->intAction);
     if (ret != kIOReturnSuccess) {
+        OSSafeReleaseNULL(IVARS->intBuf);
+        OSSafeReleaseNULL(IVARS->intPipe);
         return ret;
     }
     return kIOReturnSuccess;
@@ -1118,6 +1123,22 @@ TetherKitDriver::rndisCommand(uint32_t msgLen)
     const uint32_t requestId = hdr->request_id;
     const uint32_t requestLen = le32_to_cpu(hdr->msg_len);
 
+    // Clear the response gate and ensure the pipe is armed BEFORE sending the
+    // command. Clearing after the send risks losing a RESPONSE_AVAILABLE
+    // notification that arrives in the window between the DeviceRequest return
+    // and the clear, which would cause a 1-second spurious timeout.
+    if (IVARS->intPipe) {
+        // responseAvailable is a plain bool — safe without atomics because
+        // DriverKit serializes all _Impl callbacks on the default dispatch queue.
+        // IOSleep() yields the queue so InterruptReadComplete_Impl CAN fire between
+        // ticks and set this flag — that's the intended design. Do not add a
+        // concurrent dispatch queue without inserting a memory fence here.
+        IVARS->responseAvailable = false;
+        if (!IVARS->intArmed) {
+            armInterruptRead();
+        }
+    }
+
     uint16_t bytesSent = 0;
     ret = IVARS->commInterface->DeviceRequest(
         kIOUSBDeviceRequestDirectionOut | kIOUSBDeviceRequestTypeClass | kIOUSBDeviceRequestRecipientInterface,
@@ -1141,15 +1162,6 @@ TetherKitDriver::rndisCommand(uint32_t msgLen)
 
     bool sawNotification = false;
     if (IVARS->intPipe) {
-        // responseAvailable is a plain bool — safe without atomics because
-        // DriverKit serializes all _Impl callbacks on the default dispatch queue.
-        // IOSleep() yields the queue so InterruptReadComplete_Impl CAN fire between
-        // ticks and set this flag — that's the intended design. Do not add a
-        // concurrent dispatch queue without inserting a memory fence here.
-        IVARS->responseAvailable = false;
-        if (!IVARS->intArmed) {
-            armInterruptRead();
-        }
         for (uint32_t tick = 0; tick < kWaitMaxTicks; tick++) {
             if (IVARS->responseAvailable) {
                 sawNotification = true;
