@@ -834,7 +834,7 @@ TetherKitDriver::availableTxBytes() const
     if (!IVARS->running) {
         return 0;
     }
-    return static_cast<uint32_t>(IVARS->numFreeOutBufs) * OUT_BUF_SIZE;
+    return static_cast<uint32_t>(IVARS->numFreeOutBufs) * OUT_BUF_PAYLOAD_MAX;
 }
 
 void
@@ -1142,9 +1142,10 @@ TetherKitDriver::rndisCommand(uint32_t msgLen)
     bool sawNotification = false;
     if (IVARS->intPipe) {
         // responseAvailable is a plain bool — safe without atomics because
-        // DriverKit serializes all _Impl callbacks and ExternalMethod calls
-        // on the same default queue. Do not add a concurrent dispatch queue
-        // without adding a memory fence here.
+        // DriverKit serializes all _Impl callbacks on the default dispatch queue.
+        // IOSleep() yields the queue so InterruptReadComplete_Impl CAN fire between
+        // ticks and set this flag — that's the intended design. Do not add a
+        // concurrent dispatch queue without inserting a memory fence here.
         IVARS->responseAvailable = false;
         if (!IVARS->intArmed) {
             armInterruptRead();
