@@ -70,6 +70,8 @@ struct TetherKitDriver_IVars {
 
     uint32_t rndisXid;
     uint32_t maxOutTransferSize;
+    uint16_t outPipeMaxPacketSize;   // wMaxPacketSize of the bulk-OUT endpoint
+    uint8_t  pad_[2];                // keep struct alignment explicit
     uint8_t macAddr[6];
 
     IOBufferMemoryDescriptor * inBufs[N_IN_BUFS];
@@ -516,6 +518,17 @@ TetherKitDriver::openDataInterface()
         return kIOReturnError;
     }
 
+    // ----- Determine device speed for MPS computation -----
+    uint8_t deviceSpeed = 0; // kUSBSpeedFull / kUSBSpeedHigh / kUSBSpeedSuper
+    {
+        IOUSBHostDevice * speedDev = nullptr;
+        kern_return_t srt = IVARS->commInterface->CopyDevice(&speedDev);
+        if (srt == kIOReturnSuccess && speedDev) {
+            speedDev->GetSpeed(&deviceSpeed);
+            OSSafeReleaseNULL(speedDev);
+        }
+    }
+
     const IOUSBEndpointDescriptor * epDesc = nullptr;
     while ((epDesc = IOUSBGetNextEndpointDescriptor(
                 configDesc,
@@ -539,6 +552,15 @@ TetherKitDriver::openDataInterface()
             if (ret != kIOReturnSuccess) {
                 IOUSBHostFreeDescriptor(configDesc);
                 return ret;
+            }
+            // Cache wMaxPacketSize so we can append a trailing zero byte
+            // (the DriverKit equivalent of URB_ZERO_PACKET) whenever a TX
+            // transfer length lands on an exact MPS multiple.
+            IVARS->outPipeMaxPacketSize =
+                IOUSBGetEndpointMaxPacketSize(deviceSpeed, epDesc);
+            if (IVARS->outPipeMaxPacketSize == 0) {
+                LOG_ERROR("openDataInterface: outPipeMaxPacketSize=0; defaulting to 512");
+                IVARS->outPipeMaxPacketSize = 512;
             }
         }
     }
@@ -776,10 +798,21 @@ TetherKitDriver::consumeTxPackets(IOUserNetworkPacket ** packets, uint32_t packe
                          reinterpret_cast<const void *>(packetDataAddress),
                          ethLen);
 
+        // ZLP-substitute: if totalLen is an exact multiple of wMaxPacketSize,
+        // append a single zero byte so the host controller terminates the
+        // transfer with a short packet. The device parses by hdr->msg_len, so
+        // the trailing byte is ignored. See URB_ZERO_PACKET in linux rndis_host.
+        uint32_t submitLen = totalLen;
+        if (IVARS->outPipeMaxPacketSize > 0 &&
+            (totalLen % IVARS->outPipeMaxPacketSize) == 0) {
+            bufPtr[totalLen] = 0;
+            submitLen = totalLen + 1;
+        }
+
         IVARS->numFreeOutBufs--;
-        IVARS->outBufs[bufferIndex]->SetLength(totalLen);
+        IVARS->outBufs[bufferIndex]->SetLength(submitLen);
         kern_return_t ret = IVARS->outPipe->AsyncIO(IVARS->outBufs[bufferIndex],
-                                                    totalLen,
+                                                    submitLen,
                                                     IVARS->outActions[bufferIndex],
                                                     0);
         if (ret != kIOReturnSuccess) {
@@ -1006,7 +1039,7 @@ TetherKitDriver::rndisInit()
 
     const rndis_init_c * initC = reinterpret_cast<const rndis_init_c *>(bufAddr);
     uint32_t devMax = le32_to_cpu(initC->max_transfer_size);
-    IVARS->maxOutTransferSize = (devMax < OUT_BUF_SIZE) ? devMax : OUT_BUF_SIZE;
+    IVARS->maxOutTransferSize = (devMax < OUT_BUF_PAYLOAD_MAX) ? devMax : OUT_BUF_PAYLOAD_MAX;
 
     // Defensive floor: a usable RNDIS data path must fit at least one full
     // Ethernet frame plus the data header, otherwise consumeTxPackets() will
@@ -1019,7 +1052,7 @@ TetherKitDriver::rndisInit()
         LOG_ERROR("rndisInit: device reported max_transfer_size=%u, clamping up to %u",
                   IVARS->maxOutTransferSize, kMinUsableTransferSize);
         IVARS->maxOutTransferSize =
-            (kMinUsableTransferSize < OUT_BUF_SIZE) ? kMinUsableTransferSize : OUT_BUF_SIZE;
+            (kMinUsableTransferSize < OUT_BUF_PAYLOAD_MAX) ? kMinUsableTransferSize : OUT_BUF_PAYLOAD_MAX;
     }
 
     IVARS->rndisInitDone = true;

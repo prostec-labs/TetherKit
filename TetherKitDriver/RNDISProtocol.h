@@ -37,7 +37,14 @@
 #  define le32_to_cpu(x)  __builtin_bswap32((uint32_t)(x))
 #endif
 
-static constexpr uint32_t OUT_BUF_SIZE  = 4096;
+// One trailing byte of headroom is reserved at the end of every OUT buffer
+// so consumeTxPackets() can append a zero byte when the transfer length
+// would otherwise be an exact multiple of the bulk-OUT wMaxPacketSize.
+// USB HS bulk MPS is 512, so 4096 is already MPS-aligned and would always
+// trigger ZLP padding without this headroom. Keep the data envelope at
+// 4096 by exposing OUT_BUF_PAYLOAD_MAX = OUT_BUF_SIZE - 1.
+static constexpr uint32_t OUT_BUF_SIZE         = 4097;
+static constexpr uint32_t OUT_BUF_PAYLOAD_MAX  = 4096;
 static constexpr uint32_t IN_BUF_SIZE   = 16384;
 static constexpr int N_OUT_BUFS = 4;
 static constexpr int N_IN_BUFS  = 1;
