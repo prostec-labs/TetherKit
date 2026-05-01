@@ -268,3 +268,28 @@ To add a new USB device variant:
    `rndisInit()` in `TetherKitDriver.cpp`.
 4. Submit an updated entitlement request to Apple if the new USB class/subclass/
    protocol values are outside those already approved.
+
+---
+
+## 10. Streaming dext logs
+
+DriverKit doesn't expose `os_log_create()`, so the dext logs to `OS_LOG_DEFAULT`
+and tags every line with `[TetherKit][<category>]`. Filter live by the dext's
+bundle id (which unified logging attaches as the `process` field):
+
+```sh
+log stream --predicate 'process == "com.prostec.tetherkit.driver"'
+```
+
+To watch only error lines:
+
+```sh
+log stream --predicate 'process == "com.prostec.tetherkit.driver" \
+                       && eventMessage CONTAINS "[error]"'
+```
+
+Replay historical logs (last 5 minutes):
+
+```sh
+log show --last 5m --predicate 'process == "com.prostec.tetherkit.driver"'
+```

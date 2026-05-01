@@ -51,9 +51,15 @@
 
 #include <os/log.h>
 
-#define LOG_INFO(fmt, ...)  os_log(OS_LOG_DEFAULT, "[TetherKit] " fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) os_log(OS_LOG_DEFAULT, "[TetherKit] ERROR " fmt, ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...) os_log(OS_LOG_DEFAULT, "[TetherKit] DEBUG " fmt, ##__VA_ARGS__)
+// DriverKit's <os/log.h> exposes only OS_LOG_DEFAULT (no os_log_create), so
+// subsystem/category tagging is done in the format string. Filter live with:
+//   log stream --predicate 'process == "com.prostec.tetherkit.driver"'
+// Add `&& eventMessage CONTAINS "[main]"` to scope to a single category.
+#define TETHERKIT_LOG_SUBSYSTEM "com.prostec.tetherkit.driver"
+
+#define LOG_INFO(fmt, ...)  os_log(OS_LOG_DEFAULT, "[TetherKit][main] "  fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) os_log(OS_LOG_DEFAULT, "[TetherKit][error] " fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) os_log(OS_LOG_DEFAULT, "[TetherKit][debug] " fmt, ##__VA_ARGS__)
 
 #define super IOUserNetworkEthernet
 
