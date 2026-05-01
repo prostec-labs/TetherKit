@@ -324,6 +324,13 @@ TetherKitDriver::Stop_Impl(IOService * provider)
     OSSafeReleaseNULL(IVARS->rxQueue);
     OSSafeReleaseNULL(IVARS->pktPool);
 
+    // Clear RNDIS handshake state so a subsequent Start_Impl re-initialises the
+    // device cleanly rather than skipping rndisInit / queryMacAddress.
+    IVARS->rndisInitDone = false;
+    IVARS->maxOutTransferSize = 0;
+    IVARS->commIfNumber = 0;
+    __builtin_memset(IVARS->macAddr, 0, sizeof(IVARS->macAddr));
+
     return Stop(provider, SUPERDISPATCH);
 }
 
@@ -747,6 +754,11 @@ TetherKitDriver::consumeTxPackets(IOUserNetworkPacket ** packets, uint32_t packe
         }
 
         const int bufferIndex = IVARS->outBufStack[IVARS->numFreeOutBufs - 1];
+        if (bufferIndex < 0 || bufferIndex >= N_OUT_BUFS) {
+            LOG_ERROR("consumeTxPackets: corrupt outBufStack (idx=%d numFree=%d)",
+                      bufferIndex, IVARS->numFreeOutBufs);
+            break;
+        }
         uint8_t * bufPtr = reinterpret_cast<uint8_t *>(IVARS->outBufAddrs[bufferIndex]);
         rndis_data_hdr * hdr = reinterpret_cast<rndis_data_hdr *>(bufPtr);
         __builtin_memset(hdr, 0, sizeof(*hdr));
@@ -794,6 +806,10 @@ TetherKitDriver::DataReadComplete_Impl(OSAction * action,
     }
 
     int bufferIndex = static_cast<int>(*((uint64_t *) action->GetReference()));
+    if (bufferIndex < 0 || bufferIndex >= N_IN_BUFS) {
+        LOG_ERROR("DataReadComplete: bogus bufferIndex %d", bufferIndex);
+        return;
+    }
     if (status == kIOReturnSuccess && actualByteCount > 0) {
         processInboundBuffer(reinterpret_cast<const uint8_t *>(IVARS->inBufAddrs[bufferIndex]),
                              actualByteCount);
@@ -823,20 +839,25 @@ TetherKitDriver::processInboundBuffer(const uint8_t * buf, uint32_t size)
             LOG_ERROR("processInboundBuffer: bad msg_type/msgLen (type=%u len=%u avail=%u)", hdr->msg_type, msgLen, size);
             return;
         }
-        if (dataOfs > msgLen || 8u > msgLen - dataOfs || dataLen > msgLen - 8u - dataOfs) {
+        // Mirror HoRNDIS: data lives at +8+data_offset and spans data_len bytes,
+        // all of which must fall inside this RNDIS message.
+        if (dataOfs > msgLen || dataLen > msgLen ||
+            (8u + dataOfs + dataLen) > msgLen) {
             LOG_ERROR("processInboundBuffer: data offset/length out of bounds (ofs=%u len=%u msgLen=%u)", dataOfs, dataLen, msgLen);
             return;
         }
 
-        const uint8_t * ethPayload = buf + 8u + dataOfs;
-        IOUserNetworkPacket * receivedPacket = nullptr;
-        IOReturn ret = IVARS->pktPool->allocatePacket(&receivedPacket);
-        if (ret == kIOReturnSuccess && receivedPacket) {
-            uint64_t packetDataAddress = receivedPacket->getDataVirtualAddress();
-            __builtin_memcpy(reinterpret_cast<void *>(packetDataAddress), ethPayload, dataLen);
-            receivedPacket->setDataLength(dataLen);
-            IVARS->rxQueue->EnqueuePacket(receivedPacket);
-            receivedPacket->release();
+        if (dataLen > 0) {
+            const uint8_t * ethPayload = buf + 8u + dataOfs;
+            IOUserNetworkPacket * receivedPacket = nullptr;
+            IOReturn ret = IVARS->pktPool->allocatePacket(&receivedPacket);
+            if (ret == kIOReturnSuccess && receivedPacket) {
+                uint64_t packetDataAddress = receivedPacket->getDataVirtualAddress();
+                __builtin_memcpy(reinterpret_cast<void *>(packetDataAddress), ethPayload, dataLen);
+                receivedPacket->setDataLength(dataLen);
+                IVARS->rxQueue->EnqueuePacket(receivedPacket);
+                receivedPacket->release();
+            }
         }
 
         size -= msgLen;
@@ -856,6 +877,10 @@ TetherKitDriver::DataWriteComplete_Impl(OSAction * action,
         return;
     }
     int bufferIndex = static_cast<int>(*((uint64_t *) action->GetReference()));
+    if (bufferIndex < 0 || bufferIndex >= N_OUT_BUFS) {
+        LOG_ERROR("DataWriteComplete: bogus bufferIndex %d", bufferIndex);
+        return;
+    }
     if (IVARS->numFreeOutBufs < N_OUT_BUFS) {
         IVARS->outBufStack[IVARS->numFreeOutBufs] = static_cast<uint8_t>(bufferIndex);
         IVARS->numFreeOutBufs++;
@@ -922,6 +947,10 @@ TetherKitDriver::rndisCommand(uint32_t msgLen)
         if (ret != kIOReturnSuccess) {
             return ret;
         }
+        if (static_cast<uint32_t>(bytesReceived) > RNDIS_CMD_BUF_SZ) {
+            LOG_ERROR("rndisCommand: response %u exceeds buffer %u", bytesReceived, RNDIS_CMD_BUF_SZ);
+            return kIOReturnIOError;
+        }
         if (static_cast<uint32_t>(bytesReceived) < kMinResponseBytes) {
             IOSleep(kRetryDelayMs);
             continue;
@@ -974,6 +1003,21 @@ TetherKitDriver::rndisInit()
     const rndis_init_c * initC = reinterpret_cast<const rndis_init_c *>(bufAddr);
     uint32_t devMax = le32_to_cpu(initC->max_transfer_size);
     IVARS->maxOutTransferSize = (devMax < OUT_BUF_SIZE) ? devMax : OUT_BUF_SIZE;
+
+    // Defensive floor: a usable RNDIS data path must fit at least one full
+    // Ethernet frame plus the data header, otherwise consumeTxPackets() will
+    // silently drop every packet it sees.  Some quirky devices report a
+    // surprisingly small max_transfer_size; in practice the wire is happy to
+    // carry at least the standard 1514-byte Ethernet frame regardless.
+    static constexpr uint32_t kMinUsableTransferSize =
+        static_cast<uint32_t>(sizeof(rndis_data_hdr)) + ETHERNET_MTU + 14u;
+    if (IVARS->maxOutTransferSize < kMinUsableTransferSize) {
+        LOG_ERROR("rndisInit: device reported max_transfer_size=%u, clamping up to %u",
+                  IVARS->maxOutTransferSize, kMinUsableTransferSize);
+        IVARS->maxOutTransferSize =
+            (kMinUsableTransferSize < OUT_BUF_SIZE) ? kMinUsableTransferSize : OUT_BUF_SIZE;
+    }
+
     IVARS->rndisInitDone = true;
     return kIOReturnSuccess;
 }
@@ -1060,5 +1104,19 @@ TetherKitDriver::queryMacAddress()
     }
 
     __builtin_memcpy(IVARS->macAddr, data, 6);
+
+    // Defensive: some quirky RNDIS firmware (notably certain ZTE handsets, see
+    // Linux usbnet_cdc_zte_rx_fixup) returns a MAC with the multicast bit set,
+    // which makes the OS reject the interface.  When this happens, synthesise a
+    // locally-administered unicast MAC by clearing the multicast bit (LSB of
+    // octet 0) and setting the locally-administered bit.  Mixing in low bits of
+    // the firmware-provided MAC keeps the address stable for a given device.
+    if (IVARS->macAddr[0] & 0x01) {
+        LOG_ERROR("queryMacAddress: device returned multicast MAC %02x:%02x:%02x:%02x:%02x:%02x; substituting locally-administered unicast",
+                  IVARS->macAddr[0], IVARS->macAddr[1], IVARS->macAddr[2],
+                  IVARS->macAddr[3], IVARS->macAddr[4], IVARS->macAddr[5]);
+        IVARS->macAddr[0] = static_cast<uint8_t>((IVARS->macAddr[0] & 0xFE) | 0x02);
+    }
+
     return kIOReturnSuccess;
 }
