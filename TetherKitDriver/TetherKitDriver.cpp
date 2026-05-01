@@ -250,11 +250,19 @@ TetherKitDriver::Start_Impl(IOService * provider)
         goto bail;
     }
 
+    ret = openInterruptPipe();
+    if (ret != kIOReturnSuccess) {
+        // Non-fatal: device may not advertise an interrupt-IN endpoint.
+        LOG_ERROR("openInterruptPipe failed (non-fatal): %08x", ret);
+    }
+
     ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, RNDIS_CMD_BUF_SZ, 0, &IVARS->cmdBuf);
     if (ret != kIOReturnSuccess || !IVARS->cmdBuf) {
         ret = kIOReturnNoMemory;
         goto bail;
     }
+
+    armInterruptRead(); // best-effort; no-op if intPipe is null
 
     ret = rndisInit();
     if (ret != kIOReturnSuccess) {
@@ -314,6 +322,9 @@ TetherKitDriver::Stop_Impl(IOService * provider)
     if (IVARS->outPipe) {
         IVARS->outPipe->Abort(0, kIOReturnAborted, this);
     }
+    if (IVARS->intPipe) {
+        IVARS->intPipe->Abort(0, kIOReturnAborted, this);
+    }
 
     if (IVARS->dataInterface) {
         IVARS->dataInterface->Close(this, 0);
@@ -326,6 +337,13 @@ TetherKitDriver::Stop_Impl(IOService * provider)
 
     OSSafeReleaseNULL(IVARS->inPipe);
     OSSafeReleaseNULL(IVARS->outPipe);
+    OSSafeReleaseNULL(IVARS->intBuf);
+    OSSafeReleaseNULL(IVARS->intAction);
+    OSSafeReleaseNULL(IVARS->intPipe);
+    IVARS->intArmed = false;
+    IVARS->responseAvailable = false;
+    IVARS->intBufAddr = 0;
+    IVARS->intBufLen = 0;
 
     for (int i = 0; i < N_IN_BUFS; i++) {
         OSSafeReleaseNULL(IVARS->inBufs[i]);
@@ -1132,7 +1150,39 @@ TetherKitDriver::rndisCommand(uint32_t msgLen)
         return ret != kIOReturnSuccess ? ret : kIOReturnUnderrun;
     }
 
-    for (int attempt = 0; attempt < kMaxAttempts; attempt++) {
+    // Wait for the device to signal RESPONSE_AVAILABLE on the interrupt-IN
+    // endpoint before issuing GET_ENCAPSULATED_RESPONSE. Some devices won't
+    // reply until they've sent the notification (research finding R6).
+    static constexpr uint32_t kWaitTickMs       = 5;
+    static constexpr uint32_t kWaitMaxTicks     = 200; // 1000 ms total
+    static constexpr uint32_t kPostNotifyAttempts = 4;
+
+    bool sawNotification = false;
+    if (IVARS->intPipe) {
+        IVARS->responseAvailable = false; // arm for this command
+        if (!IVARS->intArmed) {
+            armInterruptRead();
+        }
+        for (uint32_t tick = 0; tick < kWaitMaxTicks; tick++) {
+            if (IVARS->responseAvailable) {
+                sawNotification = true;
+                break;
+            }
+            IOSleep(kWaitTickMs);
+            if (!IVARS->commInterface) {
+                return kIOReturnAborted;
+            }
+        }
+        if (!sawNotification) {
+            LOG_ERROR("rndisCommand: timed out waiting for RESPONSE_AVAILABLE");
+            // Fall through to poll loop — some devices skip the notification.
+        }
+    }
+
+    const uint32_t maxAttempts =
+        sawNotification ? kPostNotifyAttempts : static_cast<uint32_t>(kMaxAttempts);
+
+    for (uint32_t attempt = 0; attempt < maxAttempts; attempt++) {
         uint16_t bytesReceived = 0;
         ret = IVARS->commInterface->DeviceRequest(
             kIOUSBDeviceRequestDirectionIn | kIOUSBDeviceRequestTypeClass | kIOUSBDeviceRequestRecipientInterface,
