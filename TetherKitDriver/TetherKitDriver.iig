@@ -178,6 +178,16 @@ public:
                       uint32_t   actualByteCount,
                       uint64_t   completionTimestamp) TYPE(IOUSBHostPipe::CompleteAsyncIO);
 
+    /// Completion called when an interrupt-IN transfer from the comm
+    /// interface notification endpoint finishes. Parses RESPONSE_AVAILABLE
+    /// (sets a flag for rndisCommand) and INDICATE_STATUS (reports link
+    /// up/down via reportLinkStatus), then re-arms the read.
+    virtual void
+    InterruptReadComplete(OSAction * action,
+                          IOReturn   status,
+                          uint32_t   actualByteCount,
+                          uint64_t   completionTimestamp) TYPE(IOUSBHostPipe::CompleteAsyncIO);
+
 private:
     // -----------------------------------------------------------------------
     // Private helper methods — LOCALONLY (C++ only, no IIG dispatch table
@@ -188,6 +198,10 @@ private:
     // USB setup
     virtual kern_return_t openCommInterfaceFromDevice(IOUSBHostDevice * device) LOCALONLY;
     virtual kern_return_t openDataInterface() LOCALONLY;
+    virtual kern_return_t openInterruptPipe() LOCALONLY;
+    virtual kern_return_t armInterruptRead() LOCALONLY;
+    virtual void          handleNotification(const uint8_t * buf,
+                                              uint32_t        len) LOCALONLY;
     virtual kern_return_t allocateTransferResources() LOCALONLY;
     virtual kern_return_t setupNetworkInterface() LOCALONLY;
     virtual kern_return_t scheduleInboundReads() LOCALONLY;

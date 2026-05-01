@@ -91,6 +91,15 @@ struct TetherKitDriver_IVars {
     IOBufferMemoryDescriptor * cmdBuf;
     bool running;
     bool rndisInitDone;
+
+    // --- Interrupt-IN notification pipe (comm interface) ---
+    IOUSBHostPipe            * intPipe;       // CDC interrupt IN endpoint
+    OSAction                 * intAction;     // async completion action
+    IOBufferMemoryDescriptor * intBuf;        // backing buffer for notification
+    uint64_t                   intBufAddr;    // mapped virtual address
+    uint32_t                   intBufLen;     // buffer length (== wMaxPacketSize)
+    bool                       responseAvailable; // set by InterruptReadComplete
+    bool                       intArmed;     // true while AsyncIO is outstanding
 };
 
 #define IVARS ((TetherKitDriver_IVars *) ivars)
@@ -173,6 +182,9 @@ TetherKitDriver::free()
             OSSafeReleaseNULL(IVARS->outBufs[i]);
             OSSafeReleaseNULL(IVARS->outActions[i]);
         }
+        OSSafeReleaseNULL(IVARS->intBuf);
+        OSSafeReleaseNULL(IVARS->intAction);
+        OSSafeReleaseNULL(IVARS->intPipe);
         OSSafeReleaseNULL(IVARS->cmdBuf);
         OSSafeReleaseNULL(IVARS->inPipe);
         OSSafeReleaseNULL(IVARS->outPipe);
