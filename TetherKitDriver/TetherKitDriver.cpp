@@ -380,7 +380,7 @@ TetherKitDriver::openCommInterfaceFromDevice(IOUSBHostDevice * device)
     // interface immediately followed by a CDC-Data interface, then set that config.
     // Samsung S7 Edge exposes both an MTP-only config and a tethering config, so
     // hardcoding index 0 is not sufficient.
-    const IOUSBDeviceDescriptor * devDesc = device->GetDeviceDescriptor();
+    const IOUSBDeviceDescriptor * devDesc = device->CopyDeviceDescriptor();
     if (!devDesc) {
         return kIOReturnError;
     }
@@ -388,8 +388,11 @@ TetherKitDriver::openCommInterfaceFromDevice(IOUSBHostDevice * device)
     uint8_t configValue = 0;
     uint8_t controlIfNum = 0xFF;
     const IOUSBConfigurationDescriptor * winningCfg = nullptr;
+    const uint8_t numConfigurations = devDesc->bNumConfigurations;
+    IOUSBHostFreeDescriptor(devDesc);
+    devDesc = nullptr;
 
-    for (uint8_t i = 0; i < devDesc->bNumConfigurations; i++) {
+    for (uint8_t i = 0; i < numConfigurations; i++) {
         const IOUSBConfigurationDescriptor * cfgDesc = device->CopyConfigurationDescriptor(i);
         if (!cfgDesc) {
             continue;
